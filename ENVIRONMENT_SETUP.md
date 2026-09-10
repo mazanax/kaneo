@@ -89,6 +89,30 @@ For sending emails (workspace invitations, magic links, etc.), configure these v
 
 When SMTP is configured, sign-in uses email verification codes by default. Set `DISABLE_EMAIL_OTP_SIGN_IN=true` to use email/password sign-in instead (workspace invitation emails still use SMTP).
 
+#### Session lifetime
+
+Sessions are opaque tokens stored in the `session` table and carried in a cookie; these control how long one stays valid. All three accept plain seconds (`604800`) or a suffixed duration (`7d`, `12h`, `30m`). Unset values keep the Better Auth defaults, which is what Kaneo used before these variables existed.
+
+- `SESSION_EXPIRES_IN` - How long a session lasts (default: `7d`). Minimum `60s`; a lower value is ignored and logged.
+- `SESSION_UPDATE_AGE` - Sliding refresh threshold (default: `1d`). Once a session is older than this, the next request extends it by another full `SESSION_EXPIRES_IN`, so an active user is never logged out. Set it equal to `SESSION_EXPIRES_IN` for a hard, non-sliding expiry. Values above `SESSION_EXPIRES_IN` are clamped.
+- `SESSION_COOKIE_CACHE_MAX_AGE` - How long the session is served from the signed cookie without a database read (default: `5m`). This also bounds how long a revoked session (sign-out elsewhere, deleted user, role change) keeps working. Set to `0` to disable the cache and make revocation immediate, at the cost of a database read per request.
+
+> **Note:** These bound the *session*. The email sign-in code has its own, separate 5-minute lifetime.
+
+#### Rate limiting
+
+Per-IP rate limits on the `/api/auth/*` endpoints (sign-in, OTP delivery, signup, invitations). Enabled by default on every instance.
+
+- `DISABLE_RATE_LIMIT` - Set to `true` to turn the limiter off. Ignored when `KANEO_CLOUD=true`.
+- `RATE_LIMIT_WINDOW` - Window in seconds for the global fallback limit (default: `10`).
+- `RATE_LIMIT_MAX` - Requests per window per IP for the global fallback limit (default: `100`).
+
+Stricter per-path rules are applied on top and are not configurable: signup, OTP delivery and magic links at 3/min, OTP verification at 10/min, workspace invitations at 5/min.
+
+> **Note:** Counters are held in memory, per process. Running several API replicas multiplies the effective limit by the replica count, and a restart clears them.
+
+> **Note:** Buckets are keyed by client IP + path, so users sharing an egress IP (office NAT, VPN) share a bucket. If legitimate users hit the limit, raise `RATE_LIMIT_MAX`. Behind a reverse proxy, make sure the client IP actually reaches the API — see `TRUSTED_PROXIES`.
+
 #### Cloud-mode abuse mitigations
 
 Hosted multi-tenant instances should enable the cloud abuse gates. Self-hosted instances can leave these unset.

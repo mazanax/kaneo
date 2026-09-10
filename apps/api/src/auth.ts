@@ -53,6 +53,8 @@ import { getGithubSsoOAuthCredentials } from "./utils/github-sso-env";
 import { isCloud } from "./utils/is-cloud";
 import { isDisposableEmail } from "./utils/is-disposable-email";
 import { isLocalSignInPath } from "./utils/is-local-sign-in-path";
+import { getRateLimitConfig } from "./utils/rate-limit-env";
+import { getSessionLifetimeConfig } from "./utils/session-env";
 import { verifyTurnstile } from "./utils/verify-turnstile";
 
 config();
@@ -67,6 +69,9 @@ const isEmailOtpSignInDisabled =
   process.env.DISABLE_EMAIL_OTP_SIGN_IN === "true";
 const isWorkspaceCreationDisabled =
   process.env.DISABLE_WORKSPACE_CREATION === "true";
+
+const sessionLifetime = getSessionLifetimeConfig();
+const rateLimitConfig = getRateLimitConfig();
 
 function normalizeInvitationId(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
@@ -554,23 +559,21 @@ export const auth = betterAuth({
     openAPI(),
   ],
   session: {
+    // Configurable via SESSION_EXPIRES_IN / SESSION_UPDATE_AGE; both keep
+    // Better Auth's own defaults (7d / 1d) when unset. See utils/session-env.
+    expiresIn: sessionLifetime.expiresIn,
+    updateAge: sessionLifetime.updateAge,
     cookieCache: {
-      enabled: true,
-      maxAge: 5 * 60,
+      // SESSION_COOKIE_CACHE_MAX_AGE=0 disables the cache so a revoked
+      // session stops working immediately, at the cost of a database read
+      // per request.
+      enabled: sessionLifetime.cookieCacheMaxAge > 0,
+      maxAge: sessionLifetime.cookieCacheMaxAge,
     },
   },
-  rateLimit: {
-    // Enable in cloud; self-hosted instances opt in by setting KANEO_CLOUD.
-    // Default better-auth rate-limit only kicks in for production; we keep the
-    // global limits conservative and tighten signup/invite via customRules.
-    enabled: isCloud(),
-    window: 10,
-    max: 100,
-    customRules: {
-      "/sign-up/email": { window: 60, max: 3 },
-      "/organization/invite-member": { window: 60, max: 5 },
-    },
-  },
+  // On everywhere by default (self-hosted opts out with DISABLE_RATE_LIMIT),
+  // tuned via RATE_LIMIT_WINDOW / RATE_LIMIT_MAX. See utils/rate-limit-env.
+  rateLimit: rateLimitConfig,
   databaseHooks: {
     user: {
       create: {
