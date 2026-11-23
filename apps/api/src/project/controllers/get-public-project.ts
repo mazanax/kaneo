@@ -1,14 +1,26 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { HTTPException } from "hono/http-exception";
 import db from "../../database";
 import { projectTable } from "../../database/schema";
-import getTasks from "../../task/controllers/get-tasks";
+import { workspaceIsActive } from "../../workspace/archive/active-workspace-sql";
+import getTasks, {
+  type GetTasksOptions,
+} from "../../task/controllers/get-tasks";
 
-export async function getPublicProject(id: string) {
+export async function getPublicProject(
+  id: string,
+  options: GetTasksOptions = {},
+) {
   const [project] = await db
     .select({ isPublic: projectTable.isPublic })
     .from(projectTable)
-    .where(eq(projectTable.id, id))
+    .where(
+      and(
+        eq(projectTable.id, id),
+        // Public links of an archived workspace stop working until restored.
+        workspaceIsActive(projectTable.workspaceId),
+      ),
+    )
     .limit(1);
 
   if (!project) {
@@ -23,7 +35,7 @@ export async function getPublicProject(id: string) {
     });
   }
 
-  const result = await getTasks(id);
+  const result = await getTasks(id, { ...options, publicOnly: true });
 
   if (!result.data) {
     throw new HTTPException(404, {
@@ -37,5 +49,5 @@ export async function getPublicProject(id: string) {
     });
   }
 
-  return result.data;
+  return { ...result.data, pagination: result.pagination };
 }

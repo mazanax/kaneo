@@ -1,5 +1,6 @@
 import { client } from "@kaneo/libs";
 import type { InferRequestType } from "hono/client";
+import { HttpError } from "@/lib/http-error";
 
 export type UpdateProjectRequest = InferRequestType<
   (typeof client)["project"][":id"]["$put"]
@@ -13,15 +14,15 @@ async function updateProject({
   slug,
   description,
   isPublic,
+  includeSubtasks,
 }: UpdateProjectRequest) {
   const response = await client.project[":id"].$put({
     param: { id },
-    json: { name, icon, slug, description, isPublic },
+    json: { name, icon, slug, description, isPublic, includeSubtasks },
   });
 
   if (!response.ok) {
-    const error = await response.text();
-    throw new Error(error);
+    throw await HttpError.fromResponse(response);
   }
 
   const data = await response.json();

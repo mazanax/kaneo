@@ -6,26 +6,27 @@ export const openproject: Comparison = {
   category: "open-source",
   title: "Lightweight OpenProject alternative",
   description:
-    "Kaneo is a lighter, MIT-licensed OpenProject alternative: one container, SSO included in the free build, and no 25-user minimum for a supported plan.",
+    "Kaneo is a lighter OpenProject alternative with no 25-user minimum and no Enterprise add-on. Kaneo Cloud runs it for you from $4 a month.",
   summary:
     "One container instead of a platform, with nothing held back for Enterprise.",
   heading: "The lightweight OpenProject alternative",
   subheading:
     "OpenProject is a serious, mature platform, and it asks for a serious install. Kaneo is one container and a database, MIT licensed, with single sign-on in the free build.",
   verdict:
-    "Kaneo is a lighter alternative to OpenProject. Both are open source and self-hostable, but OpenProject's Community edition is GPL and keeps single sign-on, custom branding, and several other features for its Enterprise add-on, whose cloud plans start at a 25-user minimum. Kaneo is MIT licensed with no paid edition and no feature gates.",
+    "Kaneo is a lighter OpenProject alternative, and Kaneo Cloud runs it for you from $4 a month, or $5 per user for teams, with no seat minimum and nothing to maintain. OpenProject's Community edition is GPL and keeps single sign-on, custom branding, and several other features for its Enterprise add-on, whose cloud plans start at a 25-user minimum, while Kaneo has no paid edition and no feature gates. Kaneo is also MIT licensed, so you can self-host it with single sign-on included.",
   facts: {
     license: "MIT, versus GPLv3 for the OpenProject Community edition",
-    hosting: "Both self-host. Kaneo is a single container plus PostgreSQL",
+    hosting:
+      "EU-hosted Kaneo Cloud. Both self-host, Kaneo as a single container plus PostgreSQL",
     sso: "Free on every Kaneo build, Enterprise add-on for OpenProject",
-    pricing: "$0 self-hosted, cloud from $4 / month with no seat minimum",
+    pricing: "Cloud from $4 / month with no seat minimum, or $0 self-hosted",
   },
   rows: [
     { feature: "License", kaneo: "MIT", them: "GPLv3 (Community)" },
     { feature: "Self-hostable", kaneo: true, them: true },
     { feature: "SSO / OIDC in free build", kaneo: true, them: false },
     { feature: "Paid edition gates features", kaneo: false, them: true },
-    { feature: "Gantt charts", kaneo: false, them: true },
+    { feature: "Gantt charts", kaneo: true, them: true },
     { feature: "Time & cost reporting", kaneo: "Time tracking", them: true },
     { feature: "Setup", kaneo: "Minutes", them: "Involved" },
     { feature: "Cloud minimum users", kaneo: "1", them: "25" },
@@ -45,7 +46,7 @@ export const openproject: Comparison = {
     },
   ],
   honestNote:
-    "OpenProject is the more complete product for classical project management: Gantt charts, baselines, budgets, cost reporting, work-package hierarchies, and BIM support, backed by a company with a long track record and a real support offering. If you need any of that, choose OpenProject.",
+    "Both tools offer Gantt views. OpenProject goes further with baseline comparisons, budgets, cost reporting, work-package hierarchies, and BIM support. Those are reasons to choose it when project controls go beyond scheduling tasks. Kaneo combines Gantt and calendar planning with boards, custom fields, and time tracking in a smaller setup.",
   faq: [
     {
       question: "Is OpenProject completely free?",
@@ -60,7 +61,7 @@ export const openproject: Comparison = {
     {
       question: "Does Kaneo have Gantt charts?",
       answer:
-        "No. Kaneo has boards, a backlog, due dates, priorities, and task relations, but no Gantt or baseline view. If scheduling with dependencies is central to your work, OpenProject is the better tool.",
+        "Yes. Kaneo has a Gantt view for tasks with start and due dates, alongside calendar, board, and list views. It does not have baseline comparisons, budgets, or cost reporting. If those are central to your work, consider OpenProject.",
     },
     {
       question: "Can I migrate from OpenProject to Kaneo?",

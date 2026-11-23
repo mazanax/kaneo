@@ -1,3 +1,4 @@
+import { HTTPException } from "hono/http-exception";
 import { activitySchema } from "../activity/response";
 import {
   apiRouter,
@@ -5,7 +6,10 @@ import {
   errorResponse,
   jsonResponse,
 } from "../openapi";
-import { requireWorkspacePermission } from "../utils/require-workspace-permission";
+import {
+  hasWorkspacePermission,
+  requireWorkspacePermission,
+} from "../utils/require-workspace-permission";
 import { workspaceAccess } from "../utils/workspace-access-middleware";
 import createComment from "./controllers/create-comment";
 import deleteComment from "./controllers/delete-comment";
@@ -27,14 +31,15 @@ const getTaskCommentsRoute = createRoute({
   summary: "Get task comments",
   description:
     "Get every comment on a task, oldest first, each with its author's name and avatar.",
-  middleware: [workspaceAccess.fromTaskId()] as const,
+  middleware: [
+    workspaceAccess.fromTaskId(),
+    requireWorkspacePermission({ task: ["read"] }),
+  ] as const,
   request: { params: taskIdParam },
   responses: {
     200: jsonResponse("List of comments for the task", commentListSchema),
-    400: errorResponse(
-      "Unknown task, or its workspace could not be determined",
-    ),
-    403: errorResponse("No access to the task's workspace"),
+    403: errorResponse("No access to the project, or missing read permission"),
+    404: errorResponse("Task not found"),
   },
 });
 
@@ -59,10 +64,11 @@ const createTaskCommentRoute = createRoute({
   },
   responses: {
     200: jsonResponse("The created comment", activitySchema),
-    400: errorResponse("Invalid body, or unknown task"),
+    400: errorResponse("Invalid body"),
     403: errorResponse(
-      "No workspace access, or missing task:update permission",
+      "No access to the project, missing task:update permission, or external attribution without workspace:manage_settings",
     ),
+    404: errorResponse("Task not found"),
   },
 });
 
@@ -86,7 +92,7 @@ const updateTaskCommentRoute = createRoute({
   },
   responses: {
     200: jsonResponse("The updated comment", activitySchema),
-    400: errorResponse("Invalid body, or unknown comment"),
+    400: errorResponse("Invalid body"),
     403: errorResponse("Not the author, or missing task:update permission"),
     404: errorResponse("Comment not found"),
   },
@@ -106,9 +112,6 @@ const deleteTaskCommentRoute = createRoute({
   request: { params: commentParam },
   responses: {
     200: jsonResponse("The deleted comment", activitySchema),
-    400: errorResponse(
-      "Unknown comment, or its workspace could not be determined",
-    ),
     403: errorResponse("Not the author, or missing task:update permission"),
     404: errorResponse("Comment not found"),
   },
@@ -121,6 +124,16 @@ const comment = apiRouter()
   .openapi(createTaskCommentRoute, async (c) => {
     const { taskId } = c.req.valid("param");
     const { content, externalUserName, externalSource } = c.req.valid("json");
+    if (
+      externalUserName &&
+      externalSource &&
+      !(await hasWorkspacePermission(c, { workspace: ["manage_settings"] }))
+    ) {
+      throw new HTTPException(403, {
+        message:
+          "Importing external authors requires workspace:manage_settings permission",
+      });
+    }
     // Both or neither: a name without a source would render as an
     // unattributed impersonation of a real account.
     const external =

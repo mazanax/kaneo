@@ -1,19 +1,48 @@
 import { isSmtpConfigured } from "@kaneo/email";
 import { config } from "dotenv-mono";
 import { isBillingEnabled } from "../billing/config";
+import {
+  DEFAULT_STORED_SETTINGS,
+  type InstanceSettings,
+  resolveInstanceSettings,
+} from "../instance-settings/resolve-instance-settings";
+import { isStorageConfigured } from "../storage/s3";
+import {
+  parseCustomOAuthAccountUrl,
+  parseManagedProfileFields,
+} from "./custom-oauth-env";
+import { resolveFileSecret } from "./file-secret";
 import { isGithubSsoConfigured } from "./github-sso-env";
+import { isCloud } from "./is-cloud";
 
 config();
 
-function getSettings() {
+// Billing configuration must not prevent the login screen from loading.
+function isBillingAvailable() {
+  try {
+    return isBillingEnabled();
+  } catch {
+    return false;
+  }
+}
+
+function getSettings(
+  instance: InstanceSettings = resolveInstanceSettings(
+    DEFAULT_STORED_SETTINGS,
+    process.env,
+  ),
+) {
   return {
-    disableRegistration: process.env.DISABLE_REGISTRATION === "true",
-    disablePasswordRegistration:
-      process.env.DISABLE_PASSWORD_REGISTRATION === "true",
+    isCloud: isCloud(),
+    instanceName: instance.instanceName,
+    disableRegistration: !instance.registrationEnabled,
+    disablePasswordRegistration: !instance.passwordRegistrationEnabled,
     disableEmailOtpSignIn: process.env.DISABLE_EMAIL_OTP_SIGN_IN === "true",
-    disableWorkspaceCreation: process.env.DISABLE_WORKSPACE_CREATION === "true",
+    disableWorkspaceCreation: instance.workspaceCreationRestricted,
+    disabledIntegrations: instance.disabledIntegrations,
     isDemoMode: process.env.DEMO_MODE === "true",
     hasSmtp: isSmtpConfigured(),
+    hasImageUploads: isStorageConfigured(),
     hasGithubSignIn: isGithubSsoConfigured(),
     hasGoogleSignIn:
       Boolean(process.env.GOOGLE_CLIENT_ID) &&
@@ -23,12 +52,20 @@ function getSettings() {
       Boolean(process.env.DISCORD_CLIENT_SECRET),
     hasCustomOAuth:
       Boolean(process.env.CUSTOM_OAUTH_CLIENT_ID) &&
-      Boolean(process.env.CUSTOM_OAUTH_CLIENT_SECRET),
-    hasGuestAccess: process.env.DISABLE_GUEST_ACCESS !== "true",
+      Boolean(resolveFileSecret("CUSTOM_OAUTH_CLIENT_SECRET")),
+    // Mirrors `isGuestAccessAvailable`.
+    hasGuestAccess:
+      process.env.DISABLE_GUEST_ACCESS !== "true" &&
+      process.env.DISABLE_LOGIN_FORM !== "true" &&
+      instance.registrationEnabled &&
+      instance.passwordRegistrationEnabled,
     disableLoginForm: process.env.DISABLE_LOGIN_FORM === "true",
+    customOAuthName: process.env.CUSTOM_OAUTH_NAME?.trim() || null,
     customOAuthAutoLogin: process.env.CUSTOM_OAUTH_AUTO_LOGIN === "true",
     customOAuthLogoutUrl: process.env.CUSTOM_OAUTH_LOGOUT_URL || null,
-    billingEnabled: isBillingEnabled(),
+    customOAuthManagedProfileFields: parseManagedProfileFields(),
+    customOAuthAccountUrl: parseCustomOAuthAccountUrl(),
+    billingEnabled: isBillingAvailable(),
   };
 }
 

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { handleIssueOpened } from "../../../../../apps/api/src/plugins/github/webhooks/issue-opened";
 
 const mocks = vi.hoisted(() => {
@@ -13,10 +13,15 @@ const mocks = vi.hoisted(() => {
   const mockGetInstallationOctokit = vi.fn();
   const mockColumnFindFirst = vi.fn();
   const mockProjectFindFirst = vi.fn();
+  const mockLockedIntegration = vi.fn();
 
   const insertedValues: Array<Record<string, unknown>> = [];
 
   const mockDb = {
+    transaction: async (run: (tx: unknown) => Promise<unknown>) => run(mockDb),
+    select: () => ({
+      from: () => ({ where: () => ({ for: mockLockedIntegration }) }),
+    }),
     insert: () => ({
       values: (values: Record<string, unknown>) => {
         insertedValues.push(values);
@@ -56,11 +61,16 @@ const mocks = vi.hoisted(() => {
     mockColumnFindFirst,
     mockProjectFindFirst,
     mockDb,
+    mockLockedIntegration,
     insertedValues,
     mockOctokit,
     mockGithubApp,
   };
 });
+
+vi.mock("../../../../../apps/api/src/plugins/sync/eligibility", () => ({
+  canSyncTask: async () => true,
+}));
 
 vi.mock("../../../../../apps/api/src/database", () => ({
   default: mocks.mockDb,
@@ -124,7 +134,7 @@ const integration = {
       onPRMerge: "done",
     },
   }),
-  project: null,
+  project: { workspaceId: "workspace-1" },
 };
 
 function issueOpenedPayload(labels: Array<string | { name?: string }>) {
@@ -153,6 +163,7 @@ beforeEach(() => {
   mocks.mockGetGithubApp.mockReturnValue(mocks.mockGithubApp);
   mocks.mockFindAllIntegrationsByRepo.mockResolvedValue([integration]);
   mocks.mockFindExternalLink.mockResolvedValue(null);
+  mocks.mockLockedIntegration.mockResolvedValue([integration]);
   mocks.mockClaimTaskNumber.mockResolvedValue(7);
   mocks.mockResolveTargetStatus.mockResolvedValue("to-do");
   mocks.mockColumnFindFirst.mockResolvedValue(null);
@@ -184,3 +195,7 @@ describe("handleIssueOpened", () => {
     expect(mocks.insertedValues[0].priority).toBe("high");
   });
 });
+
+vi.mock("../../../../../apps/api/src/plugins/sync/issue-labels", () => ({
+  importIssueLabels: async () => undefined,
+}));

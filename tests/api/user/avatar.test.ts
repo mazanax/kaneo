@@ -1,8 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vite-plus/test";
 import {
   buildAvatarUrl,
   decodeAvatarUpload,
+  isUploadedAvatarUrl,
   MAX_AVATAR_BYTES,
+  MAX_AVATAR_INPUT_CHARS,
   normalizeAvatarMimeType,
 } from "../../../apps/api/src/user/avatar";
 
@@ -104,6 +106,44 @@ describe("decodeAvatarUpload", () => {
     ).toThrow(/maximum avatar size/);
   });
 
+  it("accepts an avatar at the exact decoded byte limit", () => {
+    expect(
+      decodeAvatarUpload({
+        contentType: "image/png",
+        data: pngOfSize(MAX_AVATAR_BYTES),
+      }).bytes.length,
+    ).toBe(MAX_AVATAR_BYTES);
+  });
+
+  it.each([" ", "A"])(
+    "rejects oversized raw %s data before cleanup or decoding",
+    (character) => {
+      const data = character.repeat(MAX_AVATAR_INPUT_CHARS + 1);
+      const from = vi.spyOn(Buffer, "from");
+      try {
+        expect(() =>
+          decodeAvatarUpload({ contentType: "image/png", data }),
+        ).toThrow(/maximum avatar size/);
+        expect(from).not.toHaveBeenCalled();
+      } finally {
+        from.mockRestore();
+      }
+    },
+  );
+
+  it("rejects a decoded-size overflow before allocating its Buffer", () => {
+    const data = pngOfSize(MAX_AVATAR_BYTES + 1);
+    const from = vi.spyOn(Buffer, "from");
+    try {
+      expect(() =>
+        decodeAvatarUpload({ contentType: "image/png", data }),
+      ).toThrow(/maximum avatar size/);
+      expect(from).not.toHaveBeenCalled();
+    } finally {
+      from.mockRestore();
+    }
+  });
+
   it("rejects bytes that do not match the declared type", () => {
     expect(() =>
       decodeAvatarUpload({
@@ -117,5 +157,23 @@ describe("decodeAvatarUpload", () => {
 describe("buildAvatarUrl", () => {
   it("builds an API-relative URL", () => {
     expect(buildAvatarUrl("abc123")).toBe("/api/user/avatar/abc123");
+  });
+});
+
+describe("isUploadedAvatarUrl", () => {
+  it("recognizes an avatar uploaded to Kaneo", () => {
+    expect(isUploadedAvatarUrl(buildAvatarUrl("abc123"))).toBe(true);
+  });
+
+  it.each([
+    null,
+    undefined,
+    "",
+    "/api/user/avatar/",
+    "/api/user/avatar/abc/def",
+    "/api/user/avatar/abc?size=64",
+    "https://cdn.example.com/api/user/avatar/abc123",
+  ])("does not treat %p as an upload", (image) => {
+    expect(isUploadedAvatarUrl(image)).toBe(false);
   });
 });

@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { describe, expect, it } from "vite-plus/test";
 import { getSmtpTransportOptions, isSmtpConfigured } from "./smtp-config";
 
 describe("getSmtpTransportOptions", () => {
@@ -46,16 +49,105 @@ describe("getSmtpTransportOptions", () => {
     expect(options.port).toBeUndefined();
   });
 
-  it("defaults to a secure connection and honours the TLS flags", () => {
+  it("defaults to encrypted delivery and keeps certificate validation enabled", () => {
     expect(getSmtpTransportOptions({ SMTP_HOST: "h" }).secure).toBe(true);
+    const options = getSmtpTransportOptions({ SMTP_SECURE: "false" });
+    expect(options.requireTLS).toBe(true);
+    expect(options.ignoreTLS).toBe(false);
+    expect(options.tls?.rejectUnauthorized).not.toBe(false);
+  });
+
+  it("rejects the formerly misleading flag instead of disabling STARTTLS", () => {
+    for (const secure of ["true", "false"]) {
+      expect(() =>
+        getSmtpTransportOptions({
+          SMTP_SECURE: secure,
+          SMTP_IGNORE_TLS: "true",
+        }),
+      ).toThrow("SMTP_IGNORE_TLS=true is no longer supported");
+    }
+  });
+
+  it("requires an explicit opt-out for relays without TLS", () => {
+    const options = getSmtpTransportOptions({
+      SMTP_SECURE: "false",
+      SMTP_REQUIRE_TLS: "false",
+      SMTP_IGNORE_TLS: "false",
+    });
+    expect(options.requireTLS).toBe(false);
+    expect(options.ignoreTLS).toBe(false);
+  });
+});
+
+describe("SMTP_PASSWORD_FILE", () => {
+  it.each([
+    { SMTP_FROM: "kaneo@example.test" },
+    { SMTP_HOST: "smtp.example.test" },
+  ])("ignores an unused password file when SMTP is disabled: %j", (env) => {
     expect(
-      getSmtpTransportOptions({ SMTP_HOST: "h", SMTP_REQUIRE_TLS: "true" })
-        .requireTLS,
-    ).toBe(true);
+      getSmtpTransportOptions({
+        ...env,
+        SMTP_USER: "me",
+        SMTP_PASSWORD_FILE: "/missing/kaneo-smtp-password",
+      }).auth,
+    ).toBeUndefined();
     expect(
-      getSmtpTransportOptions({ SMTP_HOST: "h", SMTP_IGNORE_TLS: "true" })
-        .ignoreTLS,
-    ).toBe(true);
+      getSmtpTransportOptions({
+        ...env,
+        SMTP_USER: "me",
+        SMTP_PASSWORD: "direct",
+        SMTP_PASSWORD_FILE: "/missing/kaneo-smtp-password",
+      }).auth,
+    ).toEqual({ user: "me", pass: "direct" });
+  });
+
+  it("reads the password from a file and prefers SMTP_PASSWORD", () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "kaneo-smtp-"));
+    try {
+      const file = path.join(directory, "smtp-password");
+      writeFileSync(file, "file-secret\n");
+      const env = {
+        SMTP_HOST: "smtp.example.com",
+        SMTP_FROM: "kaneo@example.test",
+        SMTP_USER: "me",
+        SMTP_PASSWORD_FILE: file,
+      };
+
+      expect(getSmtpTransportOptions(env).auth).toEqual({
+        user: "me",
+        pass: "file-secret",
+      });
+      expect(
+        getSmtpTransportOptions({ ...env, SMTP_PASSWORD: "direct" }).auth,
+      ).toEqual({ user: "me", pass: "direct" });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("fails loudly when the file is missing or empty", () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "kaneo-smtp-"));
+    try {
+      const empty = path.join(directory, "empty");
+      writeFileSync(empty, "\n");
+      const env = {
+        SMTP_HOST: "smtp.example.com",
+        SMTP_FROM: "kaneo@example.test",
+        SMTP_USER: "me",
+      };
+
+      expect(() =>
+        getSmtpTransportOptions({
+          ...env,
+          SMTP_PASSWORD_FILE: path.join(directory, "missing"),
+        }),
+      ).toThrow("SMTP_PASSWORD_FILE could not be read (ENOENT)");
+      expect(() =>
+        getSmtpTransportOptions({ ...env, SMTP_PASSWORD_FILE: empty }),
+      ).toThrow("SMTP_PASSWORD_FILE points to an empty file");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 });
 

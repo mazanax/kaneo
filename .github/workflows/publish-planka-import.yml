@@ -18,28 +18,42 @@ concurrency:
 
 jobs:
   publish:
-    runs-on: ubuntu-24.04
+    # npm provenance and trusted publishing require a GitHub-hosted runner.
+    runs-on: ubuntu-26.04
     if: ${{ github.event_name == 'push' || startsWith(github.event.release.tag_name, 'planka-import-v') }}
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
+
+      - name: Require reviewed release source
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = push ] && [ "$GITHUB_REF" != refs/heads/main ]; then
+            exit 1
+          fi
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
-          version: 10.32.1
+          version: 12.18.0
 
       # No registry-url here on purpose: it writes an .npmrc referencing
       # NODE_AUTH_TOKEN, and npm only attempts the tokenless OIDC exchange when
       # no auth is configured. Node 24 is required for npm >= 11.5.1 (OIDC).
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 24
-          cache: pnpm
+          # Publish workflows must not read cache content that a pull
+          # request could have poisoned (zizmor cache-poisoning).
+          package-manager-cache: false
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile

@@ -1,6 +1,6 @@
 import { isSmtpConfigured, sendTrialReminderEmail } from "@kaneo/email";
 import { and, asc, eq, gt, isNotNull, isNull, lte } from "drizzle-orm";
-import { isBillingEnabled } from "../billing/config";
+import { isBillingEnabled, trialDays } from "../billing/config";
 import db from "../database";
 import {
   billingReminderSentTable,
@@ -53,7 +53,11 @@ function clientUrl() {
   );
 }
 
-async function getWorkspacesNeedingReminder(type: ReminderType, now: Date) {
+async function getWorkspacesNeedingReminder(
+  type: ReminderType,
+  now: Date,
+  limit: number,
+) {
   const windowStart =
     type === "trial_ending" ? new Date(now.getTime() + 2 * DAY_MS) : null;
   const windowEnd =
@@ -107,6 +111,8 @@ async function getWorkspacesNeedingReminder(type: ReminderType, now: Date) {
         isNull(workspaceBillingTable.creemSubscriptionId),
         trialWindow,
         eq(userTable.banned, false),
+        // Nobody can upgrade an archived workspace, so do not nag its owners.
+        isNull(workspaceTable.archivedAt),
       ),
     )
     .orderBy(
@@ -115,11 +121,7 @@ async function getWorkspacesNeedingReminder(type: ReminderType, now: Date) {
     )
     .as("owners");
 
-  return db
-    .select()
-    .from(owners)
-    .orderBy(asc(owners.trialEndsAt))
-    .limit(maxPerRun());
+  return db.select().from(owners).orderBy(asc(owners.trialEndsAt)).limit(limit);
 }
 
 export async function checkTrialReminders(): Promise<{ degraded: boolean }> {
@@ -128,13 +130,19 @@ export async function checkTrialReminders(): Promise<{ degraded: boolean }> {
   }
 
   const now = new Date();
+  const limit = maxPerRun();
   let sent = 0;
   let degraded = false;
 
   for (const reminder of REMINDERS) {
+    if (sent >= limit) break;
     let rows: Awaited<ReturnType<typeof getWorkspacesNeedingReminder>>;
     try {
-      rows = await getWorkspacesNeedingReminder(reminder.type, now);
+      rows = await getWorkspacesNeedingReminder(
+        reminder.type,
+        now,
+        limit - sent,
+      );
     } catch (error) {
       console.error(`Failed to query ${reminder.type} reminders`, error);
       degraded = true;
@@ -184,6 +192,8 @@ export async function checkTrialReminders(): Promise<{ degraded: boolean }> {
           workspaceName: row.workspaceName,
           daysLeft,
           billingUrl: `${clientUrl()}/dashboard/settings/workspace/billing`,
+          trialDays: trialDays(),
+          endsAt: row.trialEndsAt,
         },
       );
       sent++;

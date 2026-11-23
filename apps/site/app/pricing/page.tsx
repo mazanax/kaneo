@@ -1,18 +1,20 @@
 import type { Metadata } from "next";
-import { FadeIn } from "@/components/landing/fade-in";
 import { Footer } from "@/components/landing/footer";
 import { Navbar } from "@/components/landing/navbar";
+import { PageIntro } from "@/components/landing/page-intro";
 import { PricingPlans } from "@/components/landing/pricing-plans";
 import { SectionSeparator } from "@/components/landing/section-separator";
+import { withSocialMetadata } from "@/lib/metadata";
+import { appStoreUrl } from "@/lib/product";
 
-export const metadata: Metadata = {
+export const metadata: Metadata = withSocialMetadata({
   title: "Pricing",
   description:
-    "Simple pricing for Kaneo Cloud. Self-hosting stays free and open source forever.",
+    "Kaneo Cloud from $4 a month, with no feature tiers. Start a 14-day free trial, no credit card required.",
   alternates: {
     canonical: "/pricing",
   },
-};
+});
 
 const notes = [
   {
@@ -22,6 +24,11 @@ const notes = [
   {
     title: "Fair billing",
     body: "Payments are processed by Creem as merchant of record; applicable taxes are handled where required. Cancel anytime; your plan stays active until the end of the billing period.",
+  },
+  {
+    title: "Mobile apps",
+    body: "The iPhone and iPad app is free for Kaneo Cloud accounts. Using it with a self-hosted server is a one-time $9.99 unlock per person.",
+    link: { label: "Get it on the App Store", href: appStoreUrl },
   },
   {
     title: "Questions?",
@@ -35,42 +42,33 @@ export default function PricingPage() {
     <>
       <Navbar />
       <main className="min-h-screen bg-[var(--background)] text-[var(--foreground)]">
-        <section className="relative overflow-hidden px-6 pt-14 pb-16 md:pt-20 md:pb-20">
+        <section className="relative overflow-hidden px-6 pt-14 pb-16 md:pt-20 md:pb-20 lg:pt-24">
           <div className="mx-auto w-full max-w-6xl">
-            <div className="max-w-2xl">
-              <FadeIn delay={0}>
-                <p className="font-medium text-primary text-sm">Pricing</p>
-              </FadeIn>
-              <FadeIn delay={60}>
-                <h1 className="mt-3 text-balance text-4xl font-medium leading-[1.06] md:text-5xl">
-                  Free to run yourself.
+            <PageIntro
+              eyebrow="Pricing"
+              title={
+                <>
+                  Simple pricing.
                   <br />
-                  Fair when we run it for you.
-                </h1>
-              </FadeIn>
-              <FadeIn delay={120}>
-                <p className="mt-5 text-balance text-foreground/70 text-lg leading-relaxed">
-                  Self-hosting is free forever. Kaneo Cloud starts with a 14-day
-                  free trial, no credit card required.
-                </p>
-              </FadeIn>
-            </div>
+                  No feature tiers.
+                </>
+              }
+              description="Kaneo Cloud handles hosting, backups, and updates. Start with a 14-day free trial, no credit card required."
+            />
 
-            <FadeIn delay={200}>
-              <div className="mt-12">
-                <PricingPlans />
-              </div>
-            </FadeIn>
+            <div className="mt-12">
+              <PricingPlans />
+            </div>
           </div>
         </section>
 
         <SectionSeparator>
           <section className="px-6 py-12 md:py-16">
-            <div className="mx-auto grid w-full max-w-6xl gap-8 md:grid-cols-3">
+            <div className="mx-auto grid w-full max-w-6xl gap-8 md:grid-cols-2 lg:grid-cols-4">
               {notes.map((note) => (
                 <div key={note.title} className="space-y-2">
                   <h3 className="font-medium text-sm">{note.title}</h3>
-                  <p className="text-foreground/70 text-sm leading-relaxed">
+                  <p className="text-muted-foreground text-sm leading-relaxed">
                     {note.body}
                     {note.email && (
                       <>
@@ -82,6 +80,19 @@ export default function PricingPage() {
                           {note.email}
                         </a>
                         .
+                      </>
+                    )}
+                    {note.link && (
+                      <>
+                        {" "}
+                        <a
+                          className="text-foreground underline underline-offset-4 hover:no-underline"
+                          href={note.link.href}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          {note.link.label}
+                        </a>
                       </>
                     )}
                   </p>

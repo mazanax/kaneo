@@ -8,6 +8,8 @@ import {
   assetTableRelations,
   columnTableRelations,
   commentTableRelations,
+  customFieldDefinitionTableRelations,
+  customFieldValueTableRelations,
   externalLinkTableRelations,
   githubIntegrationTableRelations,
   integrationTableRelations,
@@ -32,19 +34,31 @@ import {
   workspaceTableRelations,
   workspaceUserTableRelations,
 } from "./relations";
-import { resolveDatabaseConnectionString } from "./resolve-database-url";
+import { resolveDatabaseConfig } from "./resolve-database-url";
 import {
+  dataMigrationTable,
+  storageCleanupTable,
   accountTable,
   activityTable,
+  adminAuditLogTable,
+  instanceRoleTable,
+  instanceSettingsTable,
+  instanceWebhookTable,
+  instanceWebhookDeliveryTable,
   apikeyTable,
   assetTable,
   billingEventTable,
   billingReminderSentTable,
+  calendarFeedTable,
   columnTable,
   commentTable,
+  customFieldDefinitionTable,
+  customFieldValueTable,
   deviceCodeTable,
   externalLinkTable,
+  githubImportTable,
   githubIntegrationTable,
+  importRunTable,
   integrationTable,
   invitationTable,
   jobLeaseTable,
@@ -69,6 +83,8 @@ import {
   workflowRuleTable,
   workspaceBillingTable,
   workspaceRoleTable,
+  workspaceMemberAccessTable,
+  workspaceMemberProjectTable,
   workspaceTable,
   workspaceUserTable,
 } from "./schema";
@@ -76,18 +92,28 @@ import {
 config();
 
 export const schema = {
+  dataMigrationTable,
+  storageCleanupTable,
   accountTable,
+  adminAuditLogTable,
+  instanceRoleTable,
+  instanceSettingsTable,
+  instanceWebhookTable,
+  instanceWebhookDeliveryTable,
   assetTable,
   activityTable,
   apikeyTable,
   billingReminderSentTable,
   billingEventTable,
+  calendarFeedTable,
   workspaceBillingTable,
   columnTable,
   commentTable,
   deviceCodeTable,
   externalLinkTable,
   githubIntegrationTable,
+  githubImportTable,
+  importRunTable,
   integrationTable,
   invitationTable,
   jobLeaseTable,
@@ -111,6 +137,8 @@ export const schema = {
   verificationTable,
   workflowRuleTable,
   workspaceRoleTable,
+  workspaceMemberAccessTable,
+  workspaceMemberProjectTable,
   workspaceTable,
   workspaceUserTable,
   accountTableRelations,
@@ -142,6 +170,10 @@ export const schema = {
   workspaceRoleTableRelations,
   workspaceTableRelations,
   workspaceUserTableRelations,
+  customFieldDefinitionTable,
+  customFieldValueTable,
+  customFieldDefinitionTableRelations,
+  customFieldValueTableRelations,
 };
 
 type DatabaseInstance = ReturnType<typeof drizzle<typeof schema>>;
@@ -151,13 +183,14 @@ let dbInstance: DatabaseInstance | undefined;
 
 export function getDatabasePool(): Pool {
   if (!pool) {
+    const config = resolveDatabaseConfig();
     pool = new Pool({
-      connectionString: resolveDatabaseConnectionString(),
+      connectionString: config.connectionString,
       // Fail fast when Railway's internal network is slow rather than hanging
       // indefinitely and blocking every API request.
       connectionTimeoutMillis: 5_000,
       idleTimeoutMillis: 30_000,
-      max: 10,
+      max: config.poolMax,
     });
   }
 

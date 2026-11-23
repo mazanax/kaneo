@@ -68,6 +68,7 @@ export function getRateLimitConfig(
     // path listed here must be at least as strict as the built-in it shadows.
     customRules: {
       "/sign-up/email": { window: 60, max: 3 },
+      "/sign-in/anonymous": { window: 60, max: 3 },
       "/organization/invite-member": { window: 60, max: 5 },
       // Code delivery: caps how many emails one IP can trigger.
       "/email-otp/send-verification-otp": { window: 60, max: 3 },

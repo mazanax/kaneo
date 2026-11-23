@@ -1,4 +1,5 @@
 import { getApiUrl } from "@/fetchers/get-api-url";
+import { HttpError } from "@/lib/http-error";
 import type { MattermostIntegration } from "./get-mattermost-integration";
 
 export type CreateMattermostIntegrationRequest = {
@@ -31,8 +32,7 @@ async function createMattermostIntegration(
   );
 
   if (!response.ok) {
-    const error = await response.text();
-    throw new Error(error);
+    throw await HttpError.fromResponse(response);
   }
 
   return (await response.json()) as MattermostIntegration;

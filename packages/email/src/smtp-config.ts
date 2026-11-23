@@ -1,6 +1,30 @@
+import { readFileSync } from "node:fs";
 import type SMTPTransport from "nodemailer/lib/smtp-transport";
 
 type SmtpEnv = Record<string, string | undefined>;
+
+// Same rules as resolveFileSecret in apps/api, which this package cannot import.
+function resolveSmtpPassword(env: SmtpEnv): string | undefined {
+  if (env.SMTP_PASSWORD) return env.SMTP_PASSWORD;
+  if (!isSmtpConfigured(env)) return undefined;
+  const filePath = env.SMTP_PASSWORD_FILE;
+  if (!filePath) return undefined;
+
+  let value: string;
+  try {
+    value = readFileSync(filePath, "utf8").replace(/(?:\r?\n)+$/, "");
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code ?? "unknown";
+    throw new Error(
+      `SMTP_PASSWORD_FILE could not be read (${code}): ${filePath}`,
+      { cause: error },
+    );
+  }
+  if (!value) {
+    throw new Error(`SMTP_PASSWORD_FILE points to an empty file: ${filePath}`);
+  }
+  return value;
+}
 
 /**
  * Build the nodemailer transport options from the environment.
@@ -14,19 +38,26 @@ type SmtpEnv = Record<string, string | undefined>;
 export function getSmtpTransportOptions(
   env: SmtpEnv = process.env,
 ): SMTPTransport.Options {
+  if (env.SMTP_IGNORE_TLS === "true") {
+    throw new Error(
+      "SMTP_IGNORE_TLS=true is no longer supported: it disables STARTTLS, not certificate validation. Remove it and trust your SMTP CA using NODE_EXTRA_CA_CERTS. For an intentionally unencrypted local relay, set SMTP_SECURE=false and SMTP_REQUIRE_TLS=false explicitly.",
+    );
+  }
+
   const options: SMTPTransport.Options = {
     host: env.SMTP_HOST,
     secure: env.SMTP_SECURE !== "false",
-    requireTLS: env.SMTP_REQUIRE_TLS === "true",
-    ignoreTLS: env.SMTP_IGNORE_TLS === "true",
+    requireTLS: env.SMTP_REQUIRE_TLS !== "false",
+    ignoreTLS: false,
   };
 
   if (env.SMTP_PORT) {
     options.port = Number(env.SMTP_PORT);
   }
 
-  if (env.SMTP_USER && env.SMTP_PASSWORD) {
-    options.auth = { user: env.SMTP_USER, pass: env.SMTP_PASSWORD };
+  const password = env.SMTP_USER ? resolveSmtpPassword(env) : undefined;
+  if (env.SMTP_USER && password) {
+    options.auth = { user: env.SMTP_USER, pass: password };
   }
 
   return options;

@@ -11,7 +11,11 @@ import {
   normalizeGenericWebhookConfig,
 } from "../plugins/generic-webhook/config";
 import { sendDueDateReminder } from "../plugins/generic-webhook/events";
-import { REMINDER_WINDOW_MINUTES } from "./reminder-timing";
+import {
+  DUE_DATE_DURATION_MS,
+  REMINDER_WINDOW_MINUTES,
+} from "./reminder-timing";
+import { activeIntegrationCondition } from "../plugins/active-integration-condition";
 
 const MINUTE_MS = 60 * 1000;
 
@@ -29,7 +33,7 @@ export async function checkProjectWebhookReminders(): Promise<{
     .where(
       and(
         eq(integrationTable.type, "generic-webhook"),
-        eq(integrationTable.isActive, true),
+        activeIntegrationCondition(),
       ),
     );
   let degraded = false;
@@ -42,7 +46,10 @@ export async function checkProjectWebhookReminders(): Promise<{
       if (!config.events?.dueDateReminder) continue;
 
       const leadTimeMinutes = config.dueDateReminderLeadTimeMinutes ?? 1440;
-      const windowEnd = new Date(now.getTime() + leadTimeMinutes * MINUTE_MS);
+      // Count back from expiration while keeping the indexed due date unmodified.
+      const windowEnd = new Date(
+        now.getTime() + leadTimeMinutes * MINUTE_MS - DUE_DATE_DURATION_MS,
+      );
       const windowStart = new Date(
         windowEnd.getTime() - REMINDER_WINDOW_MINUTES * MINUTE_MS,
       );

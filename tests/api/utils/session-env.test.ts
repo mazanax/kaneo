@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import {
   DEFAULT_SESSION_COOKIE_CACHE_MAX_AGE,
   DEFAULT_SESSION_EXPIRES_IN,
@@ -45,6 +45,11 @@ describe("getSessionLifetimeConfig", () => {
       updateAge: DEFAULT_SESSION_UPDATE_AGE,
       cookieCacheMaxAge: DEFAULT_SESSION_COOKIE_CACHE_MAX_AGE,
     });
+  });
+
+  // Password recovery depends on revoked sessions failing immediately.
+  it("leaves the cookie cache off by default", () => {
+    expect(DEFAULT_SESSION_COOKIE_CACHE_MAX_AGE).toBe(0);
   });
 
   it("applies the configured lifetimes", () => {

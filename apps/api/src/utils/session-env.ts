@@ -2,15 +2,18 @@
  * Session lifetime configuration.
  *
  * Better Auth applies its own defaults when `session` is left unset
- * (`expiresIn` 7d, `updateAge` 1d, `cookieCache.maxAge` 5m). Those are
- * reasonable, but self-hosted instances have no way to shorten them without
- * patching the source, so the values are surfaced as env vars here and the
- * Better Auth defaults are kept as the fallbacks.
+ * (`expiresIn` 7d, `updateAge` 1d). Those are reasonable, but self-hosted
+ * instances have no way to shorten them without patching the source, so the
+ * values are surfaced as env vars here and the Better Auth defaults are kept
+ * as the fallbacks.
+ *
+ * The cookie cache defaults to off, as upstream ships it: password recovery
+ * relies on a revoked session being rejected on the very next request.
  */
 
 export const DEFAULT_SESSION_EXPIRES_IN = 60 * 60 * 24 * 7;
 export const DEFAULT_SESSION_UPDATE_AGE = 60 * 60 * 24;
-export const DEFAULT_SESSION_COOKIE_CACHE_MAX_AGE = 5 * 60;
+export const DEFAULT_SESSION_COOKIE_CACHE_MAX_AGE = 0;
 
 const DURATION_UNITS: Record<string, number> = {
   s: 1,

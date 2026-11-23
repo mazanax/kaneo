@@ -13,6 +13,16 @@ import {
   unique,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
+import type { WEBHOOK_CATEGORIES } from "../admin/webhooks/categories";
+import type { AuditWebhookPayload } from "../admin/webhooks/audit-webhook-payload";
+import type { GitHubImportState } from "../github-integration/import-state";
+import type { ImportRunProject } from "../import/import-run-project";
+import type { TaskRecurrence } from "../task/recurrence/schema";
+
+// Timestamp columns without a time zone hold UTC (Drizzle reads and writes
+// them as UTC). A bare now() default would be cast through the session time
+// zone, storing shifted times on servers not running in UTC.
+const utcNow = sql`(now() AT TIME ZONE 'utc')`;
 
 const bytea = customType<{ data: Buffer; driverData: Buffer }>({
   dataType() {
@@ -31,9 +41,11 @@ export const userTable = pgTable("user", {
     .notNull(),
   image: text("image"),
   locale: text("locale"),
-  createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+  createdAt: timestamp("created_at", { mode: "date" })
+    .default(utcNow)
+    .notNull(),
   updatedAt: timestamp("updated_at", { mode: "date" })
-    .defaultNow()
+    .default(utcNow)
     .$onUpdate(() => /* @__PURE__ */ new Date())
     .notNull(),
   isAnonymous: boolean("is_anonymous").default(false),
@@ -41,6 +53,10 @@ export const userTable = pgTable("user", {
   banned: boolean("banned").default(false),
   banReason: text("ban_reason"),
   banExpires: timestamp("ban_expires", { mode: "date" }),
+  // Set on password sign-ups while the instance requires email verification.
+  emailVerificationRequired: boolean("email_verification_required")
+    .default(false)
+    .notNull(),
 });
 
 export const sessionTable = pgTable(
@@ -49,7 +65,9 @@ export const sessionTable = pgTable(
     id: text("id").primaryKey(),
     expiresAt: timestamp("expires_at", { mode: "date" }).notNull(),
     token: text("token").notNull().unique(),
-    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    createdAt: timestamp("created_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
     updatedAt: timestamp("updated_at", { mode: "date" })
       .$onUpdate(() => /* @__PURE__ */ new Date())
       .notNull(),
@@ -61,8 +79,12 @@ export const sessionTable = pgTable(
     activeOrganizationId: text("active_organization_id"),
     activeTeamId: text("active_team_id"),
     impersonatedBy: text("impersonated_by"),
+    oidcSid: text("oidc_sid"),
   },
-  (table) => [index("session_userId_idx").on(table.userId)],
+  (table) => [
+    index("session_userId_idx").on(table.userId),
+    index("session_oidcSid_idx").on(table.oidcSid),
+  ],
 );
 
 export const accountTable = pgTable(
@@ -87,7 +109,9 @@ export const accountTable = pgTable(
     }),
     scope: text("scope"),
     password: text("password"),
-    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    createdAt: timestamp("created_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
     updatedAt: timestamp("updated_at", { mode: "date" })
       .$onUpdate(() => /* @__PURE__ */ new Date())
       .notNull(),
@@ -111,14 +135,156 @@ export const userAvatarTable = pgTable(
     mimeType: text("mime_type").notNull(),
     size: integer("size").notNull(),
     data: bytea("data").notNull(),
-    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    createdAt: timestamp("created_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
     updatedAt: timestamp("updated_at", { mode: "date" })
-      .defaultNow()
+      .default(utcNow)
       .$onUpdate(() => new Date())
       .notNull(),
   },
   (table) => [index("user_avatar_userId_idx").on(table.userId)],
 );
+
+// Instance administration history. Actor and target details are snapshots so
+// entries stay readable after the people or records involved are deleted.
+export const adminAuditLogTable = pgTable(
+  "admin_audit_log",
+  {
+    id: text("id")
+      .$defaultFn(() => createId())
+      .primaryKey(),
+    actorUserId: text("actor_user_id").references(() => userTable.id, {
+      onDelete: "set null",
+      onUpdate: "cascade",
+    }),
+    actorName: text("actor_name"),
+    actorEmail: text("actor_email"),
+    action: text("action").notNull(),
+    targetType: text("target_type").notNull(),
+    targetId: text("target_id"),
+    targetLabel: text("target_label"),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>(),
+    ipAddress: text("ip_address"),
+    userAgent: text("user_agent"),
+    createdAt: timestamp("created_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
+  },
+  (table) => [
+    index("admin_audit_log_createdAt_idx").on(
+      table.createdAt.desc(),
+      table.id.desc(),
+    ),
+    index("admin_audit_log_actorUserId_idx").on(table.actorUserId),
+    index("admin_audit_log_target_idx").on(table.targetType, table.targetId),
+  ],
+);
+
+export const instanceWebhookTable = pgTable("instance_webhook", {
+  id: text("id")
+    .$defaultFn(() => createId())
+    .primaryKey(),
+  url: text("url").notNull(),
+  categories: text("categories")
+    .array()
+    .$type<(typeof WEBHOOK_CATEGORIES)[number][]>()
+    .notNull(),
+  enabled: boolean("enabled").default(true).notNull(),
+  signingSecret: text("signing_secret").notNull(),
+  cancelPendingBefore: timestamp("cancel_pending_before", { mode: "date" }),
+  createdAt: timestamp("created_at", { mode: "date" })
+    .default(utcNow)
+    .notNull(),
+});
+
+export const instanceWebhookDeliveryTable = pgTable(
+  "instance_webhook_delivery",
+  {
+    id: text("id")
+      .$defaultFn(() => createId())
+      .primaryKey(),
+    webhookId: text("webhook_id")
+      .notNull()
+      .references(() => instanceWebhookTable.id, { onDelete: "cascade" }),
+    payload: jsonb("payload").$type<AuditWebhookPayload>().notNull(),
+    state: text("state")
+      .$type<"pending" | "succeeded" | "failed">()
+      .default("pending")
+      .notNull(),
+    attempts: integer("attempts").default(0).notNull(),
+    statusCode: integer("status_code"),
+    errorCode: text("error_code"),
+    nextAttemptAt: timestamp("next_attempt_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
+    // Use the enqueue statement's snapshot time, even inside an older action transaction.
+    createdAt: timestamp("created_at", { mode: "date" })
+      .default(sql`(statement_timestamp() AT TIME ZONE 'utc')`)
+      .notNull(),
+  },
+  (table) => [
+    index("instance_webhook_delivery_due_idx").on(
+      table.state,
+      table.nextAttemptAt,
+    ),
+    index("instance_webhook_delivery_history_idx").on(
+      table.webhookId,
+      table.createdAt.desc(),
+      table.id.desc(),
+    ),
+  ],
+);
+
+// Custom instance roles. Users hold them by name in their comma-separated
+// `user.role`, next to the built-in `admin` and `user` roles.
+export const instanceRoleTable = pgTable("instance_role", {
+  id: text("id")
+    .$defaultFn(() => createId())
+    .primaryKey(),
+  name: text("name").notNull().unique(),
+  permissions: text("permissions")
+    .array()
+    .notNull()
+    .default(sql`'{}'`),
+  createdAt: timestamp("created_at", { mode: "date" })
+    .default(utcNow)
+    .notNull(),
+  updatedAt: timestamp("updated_at", { mode: "date" })
+    .default(utcNow)
+    .$onUpdate(() => new Date())
+    .notNull(),
+});
+
+// A single row (id "instance"). Without it, every setting has its default.
+export const instanceSettingsTable = pgTable("instance_settings", {
+  id: text("id").primaryKey().default("instance"),
+  instanceName: text("instance_name"),
+  registrationEnabled: boolean("registration_enabled").default(true).notNull(),
+  passwordRegistrationEnabled: boolean("password_registration_enabled")
+    .default(true)
+    .notNull(),
+  requireEmailVerification: boolean("require_email_verification")
+    .default(false)
+    .notNull(),
+  defaultRoleId: text("default_role_id").references(
+    () => instanceRoleTable.id,
+    {
+      onDelete: "restrict",
+    },
+  ),
+  workspaceCreationRestricted: boolean("workspace_creation_restricted")
+    .default(false)
+    .notNull(),
+  disabledIntegrations: text("disabled_integrations")
+    .array()
+    .notNull()
+    .default(sql`'{}'`),
+  updatedAt: timestamp("updated_at", { mode: "date" })
+    .default(utcNow)
+    .$onUpdate(() => new Date())
+    .notNull(),
+});
 
 export const verificationTable = pgTable(
   "verification",
@@ -129,9 +295,11 @@ export const verificationTable = pgTable(
     identifier: text("identifier").notNull(),
     value: text("value").notNull(),
     expiresAt: timestamp("expires_at", { mode: "date" }).notNull(),
-    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    createdAt: timestamp("created_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
     updatedAt: timestamp("updated_at", { mode: "date" })
-      .defaultNow()
+      .default(utcNow)
       .$onUpdate(() => /* @__PURE__ */ new Date())
       .notNull(),
   },
@@ -148,6 +316,12 @@ export const workspaceTable = pgTable("workspace", {
   metadata: text("metadata"),
   description: text("description"),
   createdAt: timestamp("created_at", { mode: "date" }).notNull(),
+  // Set by an instance administrator. Archived workspaces keep their data but
+  // members, API keys, integrations, and public links can no longer use them.
+  archivedAt: timestamp("archived_at", { mode: "date" }),
+  archivedBy: text("archived_by").references(() => userTable.id, {
+    onDelete: "set null",
+  }),
 });
 
 export const workspaceUserTable = pgTable(
@@ -199,9 +373,11 @@ export const workspaceBillingTable = pgTable(
     seats: integer("seats").notNull().default(1),
     currentPeriodEnd: timestamp("current_period_end", { mode: "date" }),
     canceledAt: timestamp("canceled_at", { mode: "date" }),
-    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    createdAt: timestamp("created_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
     updatedAt: timestamp("updated_at", { mode: "date" })
-      .defaultNow()
+      .default(utcNow)
       .$onUpdate(() => new Date())
       .notNull(),
   },
@@ -211,14 +387,16 @@ export const workspaceBillingTable = pgTable(
 export const trialGrantTable = pgTable("trial_grant", {
   emailHash: text("email_hash").primaryKey(),
   trialEndsAt: timestamp("trial_ends_at", { mode: "date" }).notNull(),
-  createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+  createdAt: timestamp("created_at", { mode: "date" })
+    .default(utcNow)
+    .notNull(),
 });
 
 export const billingEventTable = pgTable("billing_event", {
   id: text("id").primaryKey(),
   eventType: text("event_type").notNull(),
   processedAt: timestamp("processed_at", { mode: "date" })
-    .defaultNow()
+    .default(utcNow)
     .notNull(),
 });
 
@@ -227,6 +405,7 @@ export const teamTable = pgTable(
   {
     id: text("id").primaryKey(),
     name: text("name").notNull(),
+    memberCount: integer("member_count").default(0).notNull(),
     workspaceId: text("workspace_id")
       .notNull()
       .references(() => workspaceTable.id, { onDelete: "cascade" }),
@@ -248,6 +427,7 @@ export const teamMemberTable = pgTable(
     userId: text("user_id")
       .notNull()
       .references(() => userTable.id, { onDelete: "cascade" }),
+    membershipKey: text("membership_key").unique(),
     createdAt: timestamp("created_at"),
   },
   (table) => [
@@ -270,10 +450,17 @@ export const invitationTable = pgTable(
     teamId: text("team_id"),
     status: text("status").default("pending").notNull(),
     expiresAt: timestamp("expires_at").notNull(),
-    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    createdAt: timestamp("created_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
     inviterId: text("inviter_id")
       .notNull()
       .references(() => userTable.id, { onDelete: "cascade" }),
+    projectAccess: text("project_access").default("all").notNull(),
+    projectIds: text("project_ids")
+      .array()
+      .default(sql`'{}'::text[]`)
+      .notNull(),
   },
   (table) => [
     index("invitation_workspaceId_idx").on(table.workspaceId),
@@ -296,9 +483,11 @@ export const workspaceRoleTable = pgTable(
       }),
     role: text("role").notNull(),
     permission: text("permission").notNull(),
-    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    createdAt: timestamp("created_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
     updatedAt: timestamp("updated_at", { mode: "date" })
-      .defaultNow()
+      .default(utcNow)
       .$onUpdate(() => new Date())
       .notNull(),
   },
@@ -324,18 +513,88 @@ export const projectTable = pgTable(
     icon: text("icon").default("Layout"),
     name: text("name").notNull(),
     description: text("description"),
-    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    createdAt: timestamp("created_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
     isPublic: boolean("is_public").default(false),
+    includeSubtasks: boolean("include_subtasks").notNull().default(true),
     archivedAt: timestamp("archived_at", { mode: "date" }),
     lastTaskNumber: integer("last_task_number").notNull().default(0),
     position: integer("position").notNull().default(0),
+    backgroundObjectKey: text("background_object_key"),
+    backgroundMimeType: text("background_mime_type"),
+    backgroundVersion: text("background_version"),
   },
   (table) => [
+    index("project_background_object_key_idx")
+      .on(table.backgroundObjectKey)
+      .where(sql`${table.backgroundObjectKey} is not null`),
     unique("project_workspace_id_id_unique").on(table.workspaceId, table.id),
     index("project_workspaceId_position_idx").on(
       table.workspaceId,
       table.position,
     ),
+  ],
+);
+
+export const workspaceMemberAccessTable = pgTable(
+  "workspace_member_access",
+  {
+    id: text("id")
+      .$defaultFn(() => createId())
+      .primaryKey(),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaceTable.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => userTable.id, { onDelete: "cascade" }),
+    projectAccess: text("project_access").default("all").notNull(),
+    createdAt: timestamp("created_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
+    updatedAt: timestamp("updated_at", { mode: "date" })
+      .default(utcNow)
+      .$onUpdate(() => new Date())
+      .notNull(),
+  },
+  (table) => [
+    unique("workspace_member_access_workspace_user_unique").on(
+      table.workspaceId,
+      table.userId,
+    ),
+    index("workspace_member_access_userId_idx").on(table.userId),
+  ],
+);
+
+export const workspaceMemberProjectTable = pgTable(
+  "workspace_member_project",
+  {
+    id: text("id")
+      .$defaultFn(() => createId())
+      .primaryKey(),
+    workspaceId: text("workspace_id").notNull(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => userTable.id, { onDelete: "cascade" }),
+    projectId: text("project_id").notNull(),
+    createdAt: timestamp("created_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.workspaceId, table.projectId],
+      foreignColumns: [projectTable.workspaceId, projectTable.id],
+    })
+      .onDelete("cascade")
+      .onUpdate("cascade"),
+    unique("workspace_member_project_workspace_user_project_unique").on(
+      table.workspaceId,
+      table.userId,
+      table.projectId,
+    ),
+    index("workspace_member_project_projectId_idx").on(table.projectId),
   ],
 );
 
@@ -357,9 +616,11 @@ export const columnTable = pgTable(
     icon: text("icon"),
     color: text("color"),
     isFinal: boolean("is_final").default(false).notNull(),
-    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    createdAt: timestamp("created_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
     updatedAt: timestamp("updated_at", { mode: "date" })
-      .defaultNow()
+      .default(utcNow)
       .$onUpdate(() => new Date())
       .notNull(),
   },
@@ -386,9 +647,11 @@ export const workflowRuleTable = pgTable(
         onDelete: "cascade",
         onUpdate: "cascade",
       }),
-    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    createdAt: timestamp("created_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
     updatedAt: timestamp("updated_at", { mode: "date" })
-      .defaultNow()
+      .default(utcNow)
       .$onUpdate(() => new Date())
       .notNull(),
   },
@@ -396,6 +659,28 @@ export const workflowRuleTable = pgTable(
     index("workflow_rule_projectId_idx").on(table.projectId),
     index("workflow_rule_columnId_idx").on(table.columnId),
   ],
+);
+
+export const calendarFeedTable = pgTable(
+  "calendar_feed",
+  {
+    id: text("id")
+      .$defaultFn(() => createId())
+      .primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projectTable.id, {
+        onDelete: "cascade",
+        onUpdate: "cascade",
+      }),
+    token: text("token").notNull().unique(),
+    labelIds: jsonb("label_ids").$type<string[]>().notNull(),
+    timeZone: text("time_zone").notNull().default("UTC"),
+    createdAt: timestamp("created_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
+  },
+  (table) => [index("calendar_feed_project_id_idx").on(table.projectId)],
 );
 
 export const taskTable = pgTable(
@@ -426,14 +711,22 @@ export const taskTable = pgTable(
     priority: text("priority").default("low").notNull(),
     startDate: timestamp("start_date", { mode: "date" }),
     dueDate: timestamp("due_date", { mode: "date" }),
-    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    recurrence: jsonb("recurrence").$type<TaskRecurrence>(),
+    createdAt: timestamp("created_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
     updatedAt: timestamp("updated_at", { mode: "date" })
-      .defaultNow()
+      .default(utcNow)
       .$onUpdate(() => new Date())
       .notNull(),
   },
   (table) => [
     index("task_projectId_idx").on(table.projectId),
+    index("task_project_scheduled_id_idx")
+      .on(table.projectId, table.id)
+      .where(
+        sql`${table.startDate} is not null or ${table.dueDate} is not null`,
+      ),
     index("task_dueDate_idx").on(table.dueDate),
     index("task_assigneeId_idx").on(table.userId),
     index("task_columnId_idx").on(table.columnId),
@@ -461,9 +754,11 @@ export const billingReminderSentTable = pgTable(
       }),
     reminderType: text("reminder_type").notNull(),
     trialEndsAt: timestamp("trial_ends_at", { mode: "date" }),
-    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    createdAt: timestamp("created_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
     updatedAt: timestamp("updated_at", { mode: "date" })
-      .defaultNow()
+      .default(utcNow)
       .$onUpdate(() => new Date())
       .notNull(),
   },
@@ -496,9 +791,11 @@ export const taskReminderSentTable = pgTable(
         onUpdate: "cascade",
       }),
     reminderType: text("reminder_type").notNull(),
-    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    createdAt: timestamp("created_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
     updatedAt: timestamp("updated_at", { mode: "date" })
-      .defaultNow()
+      .default(utcNow)
       .$onUpdate(() => new Date())
       .notNull(),
   },
@@ -531,9 +828,11 @@ export const timeEntryTable = pgTable(
     startTime: timestamp("start_time", { mode: "date" }).notNull(),
     endTime: timestamp("end_time", { mode: "date" }),
     duration: integer("duration").default(0),
-    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    createdAt: timestamp("created_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
     updatedAt: timestamp("updated_at", { mode: "date" })
-      .defaultNow()
+      .default(utcNow)
       .$onUpdate(() => new Date())
       .notNull(),
   },
@@ -556,9 +855,11 @@ export const activityTable = pgTable(
         onUpdate: "cascade",
       }),
     type: text("type").notNull(),
-    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    createdAt: timestamp("created_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
     updatedAt: timestamp("updated_at", { mode: "date" })
-      .defaultNow()
+      .default(utcNow)
       .$onUpdate(() => new Date())
       .notNull(),
     userId: text("user_id").references(() => userTable.id, {
@@ -575,6 +876,7 @@ export const activityTable = pgTable(
   (table) => [
     index("activity_task_id_idx").on(table.taskId),
     index("activity_userId_idx").on(table.userId),
+    index("activity_createdAt_idx").on(table.createdAt),
     unique("activity_task_external_source_external_url_unique").on(
       table.taskId,
       table.externalSource,
@@ -619,7 +921,9 @@ export const assetTable = pgTable(
       onDelete: "set null",
       onUpdate: "cascade",
     }),
-    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    createdAt: timestamp("created_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
   },
   (table) => [
     index("asset_workspaceId_idx").on(table.workspaceId),
@@ -627,6 +931,11 @@ export const assetTable = pgTable(
     index("asset_taskId_idx").on(table.taskId),
     index("asset_activityId_idx").on(table.activityId),
     index("asset_createdBy_idx").on(table.createdBy),
+    index("asset_draft_expiry_idx")
+      .on(table.createdAt, table.id)
+      .where(
+        sql`${table.taskId} is null and ${table.surface} in ('draft', 'draft-pending')`,
+      ),
   ],
 );
 
@@ -638,11 +947,14 @@ export const labelTable = pgTable(
       .primaryKey(),
     name: text("name").notNull(),
     color: text("color").notNull(),
-    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    createdAt: timestamp("created_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
     updatedAt: timestamp("updated_at", { mode: "date" })
-      .defaultNow()
+      .default(utcNow)
       .$onUpdate(() => new Date())
       .notNull(),
+    deletionStartedAt: timestamp("deletion_started_at", { mode: "date" }),
     taskId: text("task_id").references(() => taskTable.id, {
       onDelete: "cascade",
       onUpdate: "cascade",
@@ -655,6 +967,9 @@ export const labelTable = pgTable(
   (table) => [
     index("label_task_id_idx").on(table.taskId),
     index("label_workspace_id_idx").on(table.workspaceId),
+    index("label_workspace_cascade_idx")
+      .on(table.workspaceId, table.name, table.createdAt, table.id)
+      .where(sql`${table.taskId} is not null`),
     unique("label_task_name_unique").on(table.taskId, table.name),
     uniqueIndex("label_workspace_name_unique")
       .on(table.workspaceId, table.name)
@@ -731,9 +1046,11 @@ export const userNotificationPreferenceTable = pgTable(
     )
       .default(1440)
       .notNull(),
-    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    createdAt: timestamp("created_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
     updatedAt: timestamp("updated_at", { mode: "date" })
-      .defaultNow()
+      .default(utcNow)
       .$onUpdate(() => new Date())
       .notNull(),
   },
@@ -763,9 +1080,11 @@ export const userNotificationWorkspaceRuleTable = pgTable(
     gotifyEnabled: boolean("gotify_enabled").default(false).notNull(),
     webhookEnabled: boolean("webhook_enabled").default(false).notNull(),
     projectMode: text("project_mode").default("all").notNull(),
-    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    createdAt: timestamp("created_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
     updatedAt: timestamp("updated_at", { mode: "date" })
-      .defaultNow()
+      .default(utcNow)
       .$onUpdate(() => new Date())
       .notNull(),
   },
@@ -799,9 +1118,11 @@ export const userNotificationWorkspaceProjectTable = pgTable(
       }),
     workspaceRuleId: text("workspace_rule_id").notNull(),
     projectId: text("project_id").notNull(),
-    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    createdAt: timestamp("created_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
     updatedAt: timestamp("updated_at", { mode: "date" })
-      .defaultNow()
+      .default(utcNow)
       .$onUpdate(() => new Date())
       .notNull(),
   },
@@ -842,6 +1163,8 @@ export const userNotificationWorkspaceProjectTable = pgTable(
   ],
 );
 
+// Legacy table: the GitHub plugin migration drops it at startup on existing
+// installs, so SQL migrations must not touch it.
 export const githubIntegrationTable = pgTable("github_integration", {
   id: text("id")
     .$defaultFn(() => createId())
@@ -879,9 +1202,11 @@ export const integrationTable = pgTable(
     type: text("type").notNull(),
     config: text("config").notNull(),
     isActive: boolean("is_active").default(true),
-    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    createdAt: timestamp("created_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
     updatedAt: timestamp("updated_at", { mode: "date" })
-      .defaultNow()
+      .default(utcNow)
       .$onUpdate(() => new Date())
       .notNull(),
   },
@@ -889,6 +1214,61 @@ export const integrationTable = pgTable(
     index("integration_projectId_idx").on(table.projectId),
     index("integration_type_idx").on(table.type),
     unique("integration_project_type_unique").on(table.projectId, table.type),
+  ],
+);
+
+export const githubImportTable = pgTable("github_import", {
+  integrationId: text("integration_id")
+    .primaryKey()
+    .references(() => integrationTable.id, {
+      onDelete: "cascade",
+      onUpdate: "cascade",
+    }),
+  runId: text("run_id")
+    .notNull()
+    .$defaultFn(() => createId()),
+  state: jsonb("state").$type<GitHubImportState>().notNull(),
+  updatedAt: timestamp("updated_at", { mode: "date" })
+    .default(utcNow)
+    .notNull()
+    .$onUpdate(() => new Date()),
+});
+
+export const importRunTable = pgTable(
+  "import_run",
+  {
+    id: text("id")
+      .$defaultFn(() => createId())
+      .primaryKey(),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaceTable.id, {
+        onDelete: "cascade",
+        onUpdate: "cascade",
+      }),
+    userId: text("user_id").references(() => userTable.id, {
+      onDelete: "set null",
+      onUpdate: "cascade",
+    }),
+    source: text("source").notNull(),
+    status: text("status").notNull().default("running"),
+    includeComments: boolean("include_comments").notNull().default(true),
+    message: text("message"),
+    projects: jsonb("projects").$type<ImportRunProject[]>().notNull(),
+    error: text("error"),
+    heartbeatAt: timestamp("heartbeat_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
+    createdAt: timestamp("created_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
+    finishedAt: timestamp("finished_at", { mode: "date" }),
+  },
+  (table) => [
+    index("import_run_workspace_created_idx").on(
+      table.workspaceId,
+      table.createdAt,
+    ),
   ],
 );
 
@@ -904,20 +1284,23 @@ export const externalLinkTable = pgTable(
         onDelete: "cascade",
         onUpdate: "cascade",
       }),
-    integrationId: text("integration_id")
-      .notNull()
-      .references(() => integrationTable.id, {
+    integrationId: text("integration_id").references(
+      () => integrationTable.id,
+      {
         onDelete: "cascade",
         onUpdate: "cascade",
-      }),
+      },
+    ),
     resourceType: text("resource_type").notNull(),
     externalId: text("external_id").notNull(),
     url: text("url").notNull(),
     title: text("title"),
     metadata: text("metadata"),
-    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    createdAt: timestamp("created_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
     updatedAt: timestamp("updated_at", { mode: "date" })
-      .defaultNow()
+      .default(utcNow)
       .$onUpdate(() => new Date())
       .notNull(),
   },
@@ -926,6 +1309,11 @@ export const externalLinkTable = pgTable(
     index("external_link_integrationId_idx").on(table.integrationId),
     index("external_link_externalId_idx").on(table.externalId),
     index("external_link_resourceType_idx").on(table.resourceType),
+    index("external_link_deferred_issue_idx")
+      .on(table.id)
+      .where(
+        sql`${table.resourceType} = 'issue' AND ${table.metadata} LIKE '%"deferredIssueEdit":%'`,
+      ),
   ],
 );
 
@@ -948,9 +1336,11 @@ export const commentTable = pgTable(
         onUpdate: "cascade",
       }),
     content: text("content").notNull(),
-    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    createdAt: timestamp("created_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
     updatedAt: timestamp("updated_at", { mode: "date" })
-      .defaultNow()
+      .default(utcNow)
       .$onUpdate(() => new Date())
       .notNull(),
   },
@@ -979,7 +1369,9 @@ export const taskRelationTable = pgTable(
         onUpdate: "cascade",
       }),
     relationType: text("relation_type").notNull(),
-    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    createdAt: timestamp("created_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
   },
   (table) => [
     index("task_relation_source_idx").on(table.sourceTaskId),
@@ -1040,9 +1432,11 @@ export const deviceCodeTable = pgTable(
       onDelete: "cascade",
       onUpdate: "cascade",
     }),
-    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    createdAt: timestamp("created_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
     updatedAt: timestamp("updated_at", { mode: "date" })
-      .defaultNow()
+      .default(utcNow)
       .$onUpdate(() => new Date())
       .notNull(),
     expiresAt: timestamp("expires_at", { mode: "date" }).notNull(),
@@ -1069,9 +1463,11 @@ export const mcpOauthStateTable = pgTable(
     key: text("key").notNull(),
     payload: jsonb("payload").notNull(),
     expiresAt: timestamp("expires_at", { mode: "date" }).notNull(),
-    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    createdAt: timestamp("created_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
     updatedAt: timestamp("updated_at", { mode: "date" })
-      .defaultNow()
+      .default(utcNow)
       .$onUpdate(() => new Date())
       .notNull(),
   },
@@ -1177,3 +1573,90 @@ export const organizationRoleRelations = relations(
     }),
   }),
 );
+
+export const customFieldDefinitionTable = pgTable(
+  "custom_field_definition",
+  {
+    id: text("id")
+      .$defaultFn(() => createId())
+      .primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projectTable.id, {
+        onDelete: "cascade",
+        onUpdate: "cascade",
+      }),
+    name: text("name").notNull(),
+    type: text("type").notNull(), // 'text' | 'number' | 'date' | 'dropdown' | 'boolean'
+    required: boolean("required").default(false).notNull(),
+    defaultValue: text("default_value"),
+    options: jsonb("options"),
+    // Options kept for tasks that already use them but no longer offered.
+    hiddenOptions: jsonb("hidden_options")
+      .$type<string[]>()
+      .default([])
+      .notNull(),
+    position: integer("position").default(0).notNull(),
+    createdAt: timestamp("created_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
+    updatedAt: timestamp("updated_at", { mode: "date" })
+      .default(utcNow)
+      .$onUpdate(() => new Date())
+      .notNull(),
+  },
+  (table) => [index("custom_field_def_projectId_idx").on(table.projectId)],
+);
+
+export const customFieldValueTable = pgTable(
+  "custom_field_value",
+  {
+    id: text("id")
+      .$defaultFn(() => createId())
+      .primaryKey(),
+    taskId: text("task_id")
+      .notNull()
+      .references(() => taskTable.id, {
+        onDelete: "cascade",
+        onUpdate: "cascade",
+      }),
+    fieldId: text("field_id")
+      .notNull()
+      .references(() => customFieldDefinitionTable.id, {
+        onDelete: "cascade",
+        onUpdate: "cascade",
+      }),
+    value: text("value"),
+    createdAt: timestamp("created_at", { mode: "date" })
+      .default(utcNow)
+      .notNull(),
+    updatedAt: timestamp("updated_at", { mode: "date" })
+      .default(utcNow)
+      .$onUpdate(() => new Date())
+      .notNull(),
+  },
+  (table) => [
+    index("custom_field_value_taskId_idx").on(table.taskId),
+    index("custom_field_value_fieldId_idx").on(table.fieldId),
+    unique("custom_field_value_task_field_unique").on(
+      table.taskId,
+      table.fieldId,
+    ),
+  ],
+);
+
+// These records outlive their original owner so failed object deletion can retry.
+export const storageCleanupTable = pgTable("storage_cleanup", {
+  objectKey: text("object_key").primaryKey(),
+  lastAttemptAt: timestamp("last_attempt_at", { mode: "date" }),
+  createdAt: timestamp("created_at", { mode: "date" })
+    .default(utcNow)
+    .notNull(),
+});
+
+export const dataMigrationTable = pgTable("data_migration", {
+  id: text("id").primaryKey(),
+  completedAt: timestamp("completed_at", { mode: "date" })
+    .default(utcNow)
+    .notNull(),
+});

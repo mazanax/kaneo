@@ -16,6 +16,11 @@ import {
   removeLabelFromGitHub,
   syncLabelToGitHub,
 } from "../../plugins/github/utils/sync-label-to-github";
+import {
+  removeLabelFromGitlab,
+  syncLabelToGitlab,
+} from "../../plugins/gitlab/utils/sync-label-to-gitlab";
+import { assertProjectAccess } from "../../project-access/assert-project-access";
 
 type LabelRow = typeof labelTableType.$inferSelect;
 
@@ -29,6 +34,9 @@ async function assignLabelToTask(id: string, taskId: string, userId: string) {
       message: "Label not found",
     });
   }
+
+  if (label.deletionStartedAt)
+    throw new HTTPException(409, { message: "This label is being deleted" });
 
   const [task] = await db
     .select({
@@ -53,6 +61,8 @@ async function assignLabelToTask(id: string, taskId: string, userId: string) {
     });
   }
 
+  await assertProjectAccess(userId, task.projectId);
+
   if (label.taskId === taskId) {
     return label;
   }
@@ -74,6 +84,11 @@ async function assignLabelToTask(id: string, taskId: string, userId: string) {
           message: "Label not found",
         });
       }
+
+      if (currentLabel.deletionStartedAt)
+        throw new HTTPException(409, {
+          message: "This label is being deleted",
+        });
 
       if (
         currentLabel.workspaceId &&
@@ -142,11 +157,23 @@ async function assignLabelToTask(id: string, taskId: string, userId: string) {
     });
 
   if (previousTaskId) {
+    const previousTask = await db.query.taskTable.findFirst({
+      where: eq(taskTable.id, previousTaskId),
+      columns: { projectId: true },
+    });
+    if (previousTask)
+      await publishEvent("task.labels_updated", {
+        projectId: previousTask.projectId,
+        taskId: previousTaskId,
+      });
     removeLabelFromGitHub(previousTaskId, previousName).catch((error) => {
       console.error("Failed to remove label from GitHub:", error);
     });
     removeLabelFromGitea(previousTaskId, previousName).catch((error) => {
       console.error("Failed to remove label from Gitea:", error);
+    });
+    removeLabelFromGitlab(previousTaskId, previousName).catch((error) => {
+      console.error("Failed to remove label from GitLab:", error);
     });
   }
 
@@ -159,6 +186,9 @@ async function assignLabelToTask(id: string, taskId: string, userId: string) {
   });
   syncLabelToGitea(taskId, taskLabel.name, taskLabel.color).catch((error) => {
     console.error("Failed to sync label to Gitea:", error);
+  });
+  syncLabelToGitlab(taskId, taskLabel.name, taskLabel.color).catch((error) => {
+    console.error("Failed to sync label to GitLab:", error);
   });
 
   await publishEvent("task.label_assigned", {

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import {
   DEFAULT_RATE_LIMIT_MAX,
   DEFAULT_RATE_LIMIT_WINDOW,
@@ -58,9 +58,10 @@ describe("getRateLimitConfig", () => {
     expect(customRules["/sign-in/magic-link"]).toEqual({ window: 60, max: 3 });
   });
 
-  it("keeps the existing signup and invite rules", () => {
+  it("keeps the existing signup, guest and invite rules", () => {
     const { customRules } = getRateLimitConfig({});
     expect(customRules["/sign-up/email"]).toEqual({ window: 60, max: 3 });
+    expect(customRules["/sign-in/anonymous"]).toEqual({ window: 60, max: 3 });
     expect(customRules["/organization/invite-member"]).toEqual({
       window: 60,
       max: 5,

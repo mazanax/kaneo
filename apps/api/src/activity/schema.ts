@@ -1,6 +1,14 @@
-import { z } from "../openapi";
+import { pagingNumber, z } from "../openapi";
+
+export const activitiesQuery = z.object({
+  limit: pagingNumber(1, 100).optional().openapi({
+    description: "Maximum number of recent activities; omit for the full feed.",
+  }),
+});
 
 export const taskIdParam = z.object({ taskId: z.string() });
+
+export const workspaceIdParam = z.object({ workspaceId: z.string().min(1) });
 
 export const createActivityBody = z.object({
   taskId: z.string(),
@@ -18,12 +26,12 @@ export const createActivityBody = z.object({
 
 export const createCommentBody = z.object({
   taskId: z.string(),
-  comment: z.string(),
+  comment: z.string().max(10_000),
 });
 
 export const updateCommentBody = z.object({
   activityId: z.string(),
-  comment: z.string(),
+  comment: z.string().max(10_000),
 });
 
 export const deleteCommentBody = z.object({ activityId: z.string() });

@@ -1,22 +1,37 @@
+import { syncTaskFieldLabels } from "../../sync/sync-task-field-labels";
+import { canSyncTask } from "../../sync/eligibility";
+import { syncLatestTaskValue } from "../services/sync-latest-task-value";
+import { resolveIssueStateChange } from "../../sync/issue-state-change";
 import type { PluginContext, TaskStatusChangedEvent } from "../../types";
-import type { GitHubConfig } from "../config";
+import { type GitHubConfig, hasVerifiedGitHubBinding } from "../config";
+import { findExternalLinksByTask } from "../services/link-manager";
 import {
-  findExternalLinksByTask,
-  updateExternalLink,
-} from "../services/link-manager";
-import { getGithubApp, getInstallationIdForRepo } from "../utils/github-app";
+  getGithubApp,
+  getVerifiedInstallationOctokit,
+} from "../utils/github-app";
 import { addLabelsToIssue, removeLabel } from "../utils/labels";
 
 export async function handleTaskStatusChanged(
   event: TaskStatusChangedEvent,
   context: PluginContext,
 ): Promise<void> {
+  if (
+    !(await canSyncTask(
+      event.taskId,
+      context.integrationId,
+      undefined,
+      JSON.stringify(context.config),
+    ))
+  )
+    return;
+
   const githubApp = getGithubApp();
   if (!githubApp) {
     return;
   }
 
   const config = context.config as GitHubConfig;
+  if (!hasVerifiedGitHubBinding(config)) return;
   const { repositoryOwner, repositoryName } = config;
 
   try {
@@ -30,63 +45,75 @@ export async function handleTaskStatusChanged(
     if (!issueLink) {
       return;
     }
-
-    let installationId = config.installationId;
-    if (!installationId) {
-      installationId = await getInstallationIdForRepo(
-        repositoryOwner,
-        repositoryName,
-      );
-    }
-
-    const octokit = await githubApp.getInstallationOctokit(installationId);
+    const octokit = await getVerifiedInstallationOctokit(config);
     const issueNumber = Number.parseInt(issueLink.externalId, 10);
 
-    await removeLabel(
-      octokit,
-      repositoryOwner,
-      repositoryName,
-      issueNumber,
-      `status:${event.oldStatus}`,
+    const currentValue = await syncTaskFieldLabels(
+      event.taskId,
+      context,
+      issueLink,
+      "github",
+      "status",
+      async ({ add, remove }, write) => {
+        for (const name of remove)
+          await removeLabel(
+            octokit,
+            repositoryOwner,
+            repositoryName,
+            issueNumber,
+            name,
+            write,
+          );
+        if (add.length)
+          await addLabelsToIssue(
+            octokit,
+            repositoryOwner,
+            repositoryName,
+            issueNumber,
+            add,
+            true,
+            write,
+          );
+      },
     );
-
-    await addLabelsToIssue(
-      octokit,
-      repositoryOwner,
-      repositoryName,
-      issueNumber,
-      [`status:${event.newStatus}`],
+    if (currentValue === undefined) return;
+    const change = await resolveIssueStateChange(
+      event.projectId,
+      event.oldStatus,
+      currentValue,
     );
-
-    if (event.newStatus === "done") {
-      await octokit.rest.issues.update({
-        owner: repositoryOwner,
-        repo: repositoryName,
-        issue_number: issueNumber,
-        state: "closed",
-      });
-
-      await updateExternalLink(issueLink.id, {
-        metadata: {
-          ...(issueLink.metadata ? JSON.parse(issueLink.metadata) : {}),
-          state: "closed",
-        },
-      });
-    } else if (event.oldStatus === "done" && event.newStatus !== "done") {
-      await octokit.rest.issues.update({
-        owner: repositoryOwner,
-        repo: repositoryName,
-        issue_number: issueNumber,
-        state: "open",
-      });
-
-      await updateExternalLink(issueLink.id, {
-        metadata: {
-          ...(issueLink.metadata ? JSON.parse(issueLink.metadata) : {}),
-          state: "open",
-        },
-      });
-    }
+    if (!change) return;
+    const target = change === "close" ? "closed" : "open";
+    const readState = async () =>
+      (
+        await octokit.rest.issues.get({
+          owner: repositoryOwner,
+          repo: repositoryName,
+          issue_number: issueNumber,
+        })
+      ).data.state ?? "open";
+    // A close or reopen made on GitHub must not be echoed back: a second close
+    // without state_reason turns "not planned" into "completed".
+    // A failed read falls through to the write, as before.
+    if ((await readState().catch(() => undefined)) === target) return;
+    await syncLatestTaskValue(
+      event.taskId,
+      event.projectId,
+      issueLink,
+      "state",
+      target,
+      async (value) => {
+        const response = await octokit.rest.issues.update({
+          owner: repositoryOwner,
+          repo: repositoryName,
+          issue_number: issueNumber,
+          state: value === "closed" ? "closed" : "open",
+        });
+        return response?.data?.updated_at;
+      },
+      readState,
+      { type: "github", config: JSON.stringify(config) },
+    );
   } catch (error) {
     console.error("Failed to update GitHub issue status:", error);
   }

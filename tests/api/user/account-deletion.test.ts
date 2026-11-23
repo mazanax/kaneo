@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import {
   formatBlockedWorkspacesMessage,
   hasOwnerRole,
@@ -26,7 +26,18 @@ describe("hasOwnerRole", () => {
 
   it("matches owner inside a comma separated role list", () => {
     expect(hasOwnerRole("admin,owner")).toBe(true);
-    expect(hasOwnerRole("member, Owner ")).toBe(true);
+    expect(hasOwnerRole("member,owner")).toBe(true);
+  });
+
+  it("does not count ambiguous or differently cased grants as replacement owners", () => {
+    for (const role of [
+      "member, owner",
+      " Owner ",
+      "OWNER",
+      "member,\u00a0owner",
+    ]) {
+      expect(hasOwnerRole(role)).toBe(false);
+    }
   });
 
   it("does not match other roles", () => {

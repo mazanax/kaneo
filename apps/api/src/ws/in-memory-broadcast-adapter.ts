@@ -5,23 +5,27 @@ import type {
 } from "./broadcast-adapter";
 
 export class InMemoryBroadcastAdapter implements BroadcastAdapter {
-  private handler?: (msg: BroadcastMessage) => void;
-  private userHandler?: (msg: UserBroadcast) => void;
+  private handler?: (msg: BroadcastMessage) => void | Promise<void>;
+  private userHandler?: (msg: UserBroadcast) => void | Promise<void>;
 
   async publish(msg: BroadcastMessage): Promise<void> {
     // Deliver directly in the same process
-    this.handler?.(msg);
+    await this.handler?.(msg);
   }
 
   async publishToUser(msg: UserBroadcast): Promise<void> {
-    this.userHandler?.(msg);
+    await this.userHandler?.(msg);
   }
 
-  async subscribe(handler: (msg: BroadcastMessage) => void): Promise<void> {
+  async subscribe(
+    handler: (msg: BroadcastMessage) => void | Promise<void>,
+  ): Promise<void> {
     this.handler = handler;
   }
 
-  async subscribeToUser(handler: (msg: UserBroadcast) => void): Promise<void> {
+  async subscribeToUser(
+    handler: (msg: UserBroadcast) => void | Promise<void>,
+  ): Promise<void> {
     this.userHandler = handler;
   }
 

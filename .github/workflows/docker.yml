@@ -1,9 +1,9 @@
 name: Build & publish images to GHCR
 
 # Two ways in:
-#   * push a suffixed tag (v2.23.2-patched) -- for builds that are not cut by
+#   * push a suffixed tag (v2.50.0-patched) -- for builds that are not cut by
 #     the release workflow, e.g. a fork carrying local patches;
-#   * run it by hand with any version.
+#   * run it by hand from main with a suffixed version.
 #
 # Plain vX.Y.Z tags are deliberately NOT a trigger: those are created by
 # semantic-release in release.yml, which has already built and pushed the
@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to tag the images (e.g. 2.23.2, v2.23.2-patched)"
+        description: "Suffixed fork version to build from this ref (e.g. 2.50.0-patched, v2.50.0-patched)"
         required: true
         type: string
       latest:
@@ -54,8 +54,9 @@ jobs:
           # package.json and Chart.yaml must be bare semver.
           version="${raw#v}"
 
-          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::'$raw' is not a version this workflow can build. Expected semver, optionally v-prefixed and with a suffix: 2.23.2, v2.23.2, v2.23.2-patched."
+          # The suffix is required: plain versions belong to release.yml.
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.-]+$ ]]; then
+            echo "::error::'$raw' is not a version this workflow can build. Expected suffixed semver, optionally v-prefixed: 2.50.0-patched, v2.50.0-patched."
             exit 1
           fi
 
@@ -96,8 +97,12 @@ jobs:
     permissions:
       contents: read
       packages: write
-    uses: ./.github/workflows/build-images.yml
-    secrets: inherit
+
+    uses: ./.github/workflows/build-images.yml # zizmor: ignore[self-repository] $/-syntax not parsed by pinned actionlint v1.7.12; revisit when supported
+    secrets:
+      GH_PACKAGE_TOKEN: ${{ secrets.GH_PACKAGE_TOKEN }}
+      SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
     with:
+      source_mode: patched
       version: ${{ needs.resolve.outputs.version }}
       tags: ${{ needs.resolve.outputs.tags }}

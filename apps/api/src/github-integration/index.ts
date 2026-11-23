@@ -2,9 +2,10 @@ import { and, eq } from "drizzle-orm";
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import db from "../database";
-import { integrationTable } from "../database/schema";
+import { publishEvent } from "../events";
+import { accountTable, integrationTable } from "../database/schema";
 import { scopeToProjectFromBody } from "../integrations/middleware";
-import { projectIdBody, projectIdParam } from "../integrations/schema";
+import { projectIdParam } from "../integrations/schema";
 import {
   apiRouter,
   type BaseVariables,
@@ -17,6 +18,8 @@ import {
   validateGitHubConfig,
 } from "../plugins/github/config";
 import { handleGitHubWebhook } from "../plugins/github/webhook-handler";
+import { isGithubSsoConfigured } from "../utils/github-sso-env";
+import { requireUserSession } from "../utils/require-user-session";
 import { requireWorkspacePermission } from "../utils/require-workspace-permission";
 import { workspaceAccess } from "../utils/workspace-access-middleware";
 import createGithubIntegration from "./controllers/create-github-integration";
@@ -25,6 +28,7 @@ import getGithubIntegration from "./controllers/get-github-integration";
 import { importIssues } from "./controllers/import-issues";
 import listUserRepositories from "./controllers/list-user-repositories";
 import verifyGithubInstallation from "./controllers/verify-github-installation";
+import { verifyRepositoryOwner } from "./controllers/verify-repository-owner";
 import {
   createdGithubIntegrationSchema,
   deleteResultSchema,
@@ -32,10 +36,15 @@ import {
   githubIntegrationSchema,
   githubRepositoryListSchema,
   importResultSchema,
-  integrationNotFoundSchema,
   verificationResultSchema,
 } from "./response";
-import { createGitHubBody, updateGitHubBody, verifyGitHubBody } from "./schema";
+import {
+  createGitHubBody,
+  importGitHubBody,
+  repositoryPageQuery,
+  updateGitHubBody,
+  verifyGitHubBody,
+} from "./schema";
 
 const manageAccess = [
   workspaceAccess.fromProject("projectId"),
@@ -62,20 +71,18 @@ const listRepositoriesRoute = createRoute({
   tags: ["GitHub"],
   summary: "List GitHub repositories",
   description:
-    "List the repositories reachable through the installed GitHub App, for picking one to link.",
-  middleware: manageAccess,
-  request: { params: projectIdParam },
+    "List the repositories reachable through the installed GitHub App that the caller administers, for picking one to link. Without `search`, each request reads one page of one installation. With `search`, the server filters by name and description before checking access and keeps scanning later pages and installations within a fixed budget. Follow `nextPage` until it is null to see every repository.",
+  middleware: [requireUserSession, ...manageAccess],
+  request: { params: projectIdParam, query: repositoryPageQuery },
   responses: {
     200: jsonResponse(
       "Repositories reachable through the installed App",
       githubRepositoryListSchema,
     ),
-    400: errorResponse(
-      "Unknown project, or its workspace could not be determined",
-    ),
     403: errorResponse(
-      "No workspace access, or missing workspace:manage_settings",
+      "No access to the project, or missing workspace:manage_settings",
     ),
+    404: errorResponse("Project not found"),
   },
 });
 
@@ -87,7 +94,11 @@ const verifyRoute = createRoute({
   summary: "Verify GitHub installation",
   description:
     "Check that the GitHub App is installed on a repository and holds the permissions Kaneo needs. Always 200 -- problems are reported in the body so the client can guide the user.",
-  middleware: manageAccess,
+  middleware: [
+    requireUserSession,
+    scopeToProjectFromBody,
+    requireWorkspacePermission({ workspace: ["manage_settings"] }),
+  ],
   request: {
     body: {
       required: true,
@@ -96,10 +107,11 @@ const verifyRoute = createRoute({
   },
   responses: {
     200: jsonResponse("Verification result", verificationResultSchema),
-    400: errorResponse("Invalid body, or unknown project"),
+    400: errorResponse("Invalid body"),
     403: errorResponse(
-      "No workspace access, or missing workspace:manage_settings",
+      "No access to the project, or missing workspace:manage_settings",
     ),
+    404: errorResponse("Project not found"),
   },
 });
 
@@ -111,17 +123,20 @@ const getIntegrationRoute = createRoute({
   summary: "Get GitHub integration",
   description:
     "Get the GitHub integration for a project, or null when none is configured.",
-  middleware: [workspaceAccess.fromProject("projectId")] as const,
+  middleware: [
+    workspaceAccess.fromProject("projectId"),
+    requireWorkspacePermission({ project: ["read"] }),
+  ] as const,
   request: { params: projectIdParam },
   responses: {
     200: jsonResponse(
       "GitHub integration details, or null",
       githubIntegrationSchema.nullable(),
     ),
-    400: errorResponse(
-      "Unknown project, or its workspace could not be determined",
+    403: errorResponse(
+      "No access to the project, or missing project:read permission",
     ),
-    403: errorResponse("No access to the project's workspace"),
+    404: errorResponse("Project not found"),
   },
 });
 
@@ -131,8 +146,9 @@ const createIntegrationRoute = createRoute({
   path: "/project/{projectId}",
   tags: ["GitHub"],
   summary: "Create GitHub integration",
-  description: "Link a project to a GitHub repository.",
-  middleware: manageAccess,
+  description:
+    "Link a project to a GitHub repository. Disconnect first to switch repositories; existing issue and pull request links cannot be reused for another repository.",
+  middleware: [requireUserSession, ...manageAccess],
   request: {
     params: projectIdParam,
     body: {
@@ -142,10 +158,14 @@ const createIntegrationRoute = createRoute({
   },
   responses: {
     200: jsonResponse("The stored integration", createdGithubIntegrationSchema),
-    400: errorResponse("Invalid body, or unknown project"),
-    403: errorResponse(
-      "No workspace access, or missing workspace:manage_settings",
+    409: errorResponse(
+      "Integration changed or another repository is already linked",
     ),
+    400: errorResponse("Invalid body"),
+    403: errorResponse(
+      "No access to the project, or missing workspace:manage_settings",
+    ),
+    404: errorResponse("Project not found"),
   },
 });
 
@@ -170,11 +190,14 @@ const updateIntegrationRoute = createRoute({
       "The updated integration",
       githubIntegrationSchema.nullable(),
     ),
+    409: errorResponse(
+      "Integration changed or another repository is already linked",
+    ),
     400: errorResponse("The resulting config failed validation"),
     403: errorResponse(
-      "No workspace access, or missing workspace:manage_settings",
+      "No access to the project, or missing workspace:manage_settings",
     ),
-    404: jsonResponse("Integration not found", integrationNotFoundSchema),
+    404: errorResponse("Project or integration not found"),
   },
 });
 
@@ -189,13 +212,10 @@ const deleteIntegrationRoute = createRoute({
   request: { params: projectIdParam },
   responses: {
     200: jsonResponse("The integration was removed", deleteResultSchema),
-    400: errorResponse(
-      "Unknown project, or its workspace could not be determined",
-    ),
     403: errorResponse(
-      "No workspace access, or missing workspace:manage_settings",
+      "No access to the project, or missing workspace:manage_settings",
     ),
-    404: errorResponse("GitHub integration not found"),
+    404: errorResponse("Project or GitHub integration not found"),
   },
 });
 
@@ -206,22 +226,33 @@ const importIssuesRoute = createRoute({
   tags: ["GitHub"],
   summary: "Import GitHub issues",
   description:
-    "Import the linked repository's issues as tasks. Issues that already have a task are skipped.",
+    "Import open issues and link open pull requests in bounded steps. Existing tasks are updated. Continue 202 responses with the returned runId until 200; the same runId safely retries completion. Progress is saved after each page. New calls without runId resume an unfinished import or start a new one after completion.",
   middleware: [
     scopeToProjectFromBody,
-    requireWorkspacePermission({ task: ["create"] }),
+    requireWorkspacePermission({ task: ["create", "update"] }),
   ] as const,
   request: {
     body: {
       required: true,
-      content: { "application/json": { schema: projectIdBody } },
+      content: { "application/json": { schema: importGitHubBody } },
     },
   },
   responses: {
-    200: jsonResponse("Import summary", importResultSchema),
+    200: jsonResponse("Completed import summary", importResultSchema),
+    202: jsonResponse(
+      "Saved import progress; continue with runId",
+      importResultSchema,
+    ),
+    409: errorResponse(
+      "Integration or import changed; refresh before resuming",
+    ),
+    429: errorResponse("Import busy; retry after one second"),
+    502: errorResponse(
+      "Provider unavailable or invalid page; progress is saved",
+    ),
     400: errorResponse("projectId is required"),
     403: errorResponse(
-      "No workspace access, or missing task:create permission",
+      "No access to the project, or missing task:create or task:update permission",
     ),
     404: errorResponse("Project not found"),
   },
@@ -229,20 +260,39 @@ const importIssuesRoute = createRoute({
 
 const githubIntegration = apiRouter<BaseVariables & { workspaceId: string }>()
   .openapi(getAppInfoRoute, async (c) => {
+    const account = await db.query.accountTable.findFirst({
+      where: and(
+        eq(accountTable.userId, c.get("userId")),
+        eq(accountTable.providerId, "github"),
+      ),
+      columns: { id: true },
+    });
     return c.json(
       {
         appName: process.env.GITHUB_APP_NAME || null,
+        accountConnected: Boolean(account),
+        accountLinkingAvailable: isGithubSsoConfigured(),
       },
       200,
     );
   })
   .openapi(listRepositoriesRoute, async (c) => {
-    const repositories = await listUserRepositories();
+    const { search, ...page } = c.req.valid("query");
+    const repositories = await listUserRepositories(
+      c.get("userId"),
+      page,
+      search || undefined,
+    );
     return c.json(repositories, 200);
   })
   .openapi(verifyRoute, async (c) => {
     const { repositoryOwner, repositoryName } = c.req.valid("json");
 
+    await verifyRepositoryOwner(
+      c.get("userId"),
+      repositoryOwner,
+      repositoryName,
+    );
     const verification = await verifyGithubInstallation({
       repositoryOwner,
       repositoryName,
@@ -260,11 +310,17 @@ const githubIntegration = apiRouter<BaseVariables & { workspaceId: string }>()
     const { repositoryOwner, repositoryName } = c.req.valid("json");
 
     const integration = await createGithubIntegration({
+      userId: c.get("userId"),
       projectId,
       repositoryOwner,
       repositoryName,
     });
 
+    if (integration)
+      await publishEvent("integration.sync_rules_changed", {
+        projectId,
+        integrationId: integration.id,
+      });
     return c.json(integration, 200);
   })
   .openapi(updateIntegrationRoute, async (c) => {
@@ -279,7 +335,7 @@ const githubIntegration = apiRouter<BaseVariables & { workspaceId: string }>()
     });
 
     if (!row) {
-      return c.json({ error: "Integration not found" }, 404);
+      throw new HTTPException(404, { message: "Integration not found" });
     }
 
     let config: GitHubConfig;
@@ -303,7 +359,7 @@ const githubIntegration = apiRouter<BaseVariables & { workspaceId: string }>()
       });
     }
 
-    await db
+    const [saved] = await db
       .update(integrationTable)
       .set({
         config: JSON.stringify(config),
@@ -313,12 +369,23 @@ const githubIntegration = apiRouter<BaseVariables & { workspaceId: string }>()
       })
       .where(
         and(
-          eq(integrationTable.projectId, projectId),
-          eq(integrationTable.type, "github"),
+          eq(integrationTable.id, row.id),
+          eq(integrationTable.config, row.config),
         ),
-      );
+      )
+      .returning({ id: integrationTable.id });
+    if (!saved)
+      throw new HTTPException(409, {
+        message: "GitHub integration changed; refresh before updating",
+      });
 
     const updated = await getGithubIntegration(projectId);
+    if (body.isActive === true && !row.isActive)
+      await publishEvent("integration.sync_rules_changed", {
+        projectId,
+        integrationId: row.id,
+      });
+    await publishEvent("project.updated", { projectId, linksChanged: true });
     return c.json(updated, 200);
   })
   .openapi(deleteIntegrationRoute, async (c) => {
@@ -327,9 +394,9 @@ const githubIntegration = apiRouter<BaseVariables & { workspaceId: string }>()
     return c.json(result, 200);
   })
   .openapi(importIssuesRoute, async (c) => {
-    const { projectId } = c.req.valid("json");
-    const result = await importIssues(projectId);
-    return c.json(result, 200);
+    const { projectId, runId } = c.req.valid("json");
+    const result = await importIssues(projectId, runId);
+    return result.pending ? c.json(result, 202) : c.json(result, 200);
   });
 
 export async function handleGithubWebhookRoute(c: Context) {

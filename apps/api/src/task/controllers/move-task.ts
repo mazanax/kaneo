@@ -1,16 +1,20 @@
-import { and, asc, eq, max } from "drizzle-orm";
+import { and, asc, eq, isNotNull, notInArray } from "drizzle-orm";
 import { HTTPException } from "hono/http-exception";
+import createActivities from "../../activity/controllers/create-activities";
 import db from "../../database";
 import {
   assetTable,
   columnTable,
+  externalLinkTable,
+  integrationTable,
   projectTable,
   taskTable,
 } from "../../database/schema";
 import { publishEvent } from "../../events";
+import { assertProjectAccess } from "../../project-access/assert-project-access";
+import { filterUsersWithProjectAccess } from "../../project-access/filter-users-with-project-access";
 import { claimTaskNumber } from "./claim-task-numbers";
-
-type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
+import { nextTaskPosition } from "./next-task-position";
 
 function isSameProjectMove(
   sourceProjectId: string,
@@ -59,26 +63,6 @@ async function resolveDestinationStatus(
   return requestedColumn ?? matchingCurrentColumn ?? firstColumn;
 }
 
-async function getNextTaskPosition(
-  dbOrTx: DbOrTx,
-  projectId: string,
-  status: string,
-  columnId: string,
-) {
-  const [maxPositionResult] = await dbOrTx
-    .select({ maxPosition: max(taskTable.position) })
-    .from(taskTable)
-    .where(
-      and(
-        eq(taskTable.projectId, projectId),
-        eq(taskTable.status, status),
-        eq(taskTable.columnId, columnId),
-      ),
-    );
-
-  return (maxPositionResult?.maxPosition ?? 0) + 1;
-}
-
 async function moveTask({
   taskId,
   destinationProjectId,
@@ -106,26 +90,28 @@ async function moveTask({
     });
   }
 
-  const [sourceProject, destinationProject] = await Promise.all([
-    db.query.projectTable.findFirst({
-      where: eq(projectTable.id, existingTask.projectId),
-    }),
-    db.query.projectTable.findFirst({
-      where: eq(projectTable.id, destinationProjectId),
-    }),
-  ]);
-
-  if (!sourceProject || !destinationProject) {
+  const sourceProject = await db.query.projectTable.findFirst({
+    where: eq(projectTable.id, existingTask.projectId),
+  });
+  if (!sourceProject) {
     throw new HTTPException(404, {
       message: "Project not found",
     });
   }
 
-  if (sourceProject.workspaceId !== destinationProject.workspaceId) {
-    throw new HTTPException(400, {
-      message: "Tasks can only be moved within the same workspace",
+  const destinationProject = await db.query.projectTable.findFirst({
+    where: and(
+      eq(projectTable.id, destinationProjectId),
+      eq(projectTable.workspaceId, sourceProject.workspaceId),
+    ),
+  });
+  if (!destinationProject) {
+    throw new HTTPException(404, {
+      message: "Project not found",
     });
   }
+
+  await assertProjectAccess(currentUserId, destinationProjectId);
 
   const resolvedColumn = await resolveDestinationStatus(
     destinationProjectId,
@@ -134,15 +120,29 @@ async function moveTask({
   );
 
   const movedTask = await db.transaction(async (tx) => {
-    const [nextTaskNumber, nextPosition] = await Promise.all([
-      claimTaskNumber(destinationProjectId, tx),
-      getNextTaskPosition(
-        tx,
-        destinationProjectId,
-        resolvedColumn.slug,
-        resolvedColumn.id,
-      ),
-    ]);
+    for (const projectId of [sourceProject.id, destinationProjectId].sort()) {
+      const [project] = await tx
+        .select({ id: projectTable.id })
+        .from(projectTable)
+        .where(
+          and(
+            eq(projectTable.id, projectId),
+            eq(projectTable.workspaceId, sourceProject.workspaceId),
+          ),
+        )
+        .for("key share");
+      if (!project)
+        throw new HTTPException(409, {
+          message: "Project was moved to another workspace, please try again",
+        });
+    }
+    const nextTaskNumber = await claimTaskNumber(destinationProjectId, tx);
+    const nextPosition = await nextTaskPosition(
+      tx,
+      destinationProjectId,
+      resolvedColumn.slug,
+      resolvedColumn.id,
+    );
 
     const [updatedTask] = await tx
       .update(taskTable)
@@ -153,21 +153,74 @@ async function moveTask({
         number: nextTaskNumber,
         position: nextPosition,
       })
-      .where(eq(taskTable.id, taskId))
+      .where(
+        and(
+          eq(taskTable.id, taskId),
+          eq(taskTable.projectId, sourceProject.id),
+        ),
+      )
       .returning();
 
     if (!updatedTask) {
-      throw new HTTPException(500, {
-        message: "Failed to move task",
+      throw new HTTPException(409, {
+        message: "Task was moved concurrently, please try again",
       });
     }
+
+    let movedTask = updatedTask;
+    const assigneeId = updatedTask.userId;
+    if (
+      assigneeId &&
+      !(
+        await filterUsersWithProjectAccess(
+          [assigneeId],
+          destinationProjectId,
+          tx,
+        )
+      ).has(assigneeId)
+    ) {
+      const [unassignedTask] = await tx
+        .update(taskTable)
+        .set({ userId: null })
+        .where(eq(taskTable.id, taskId))
+        .returning();
+      movedTask = unassignedTask ?? { ...updatedTask, userId: null };
+      await createActivities(
+        [
+          {
+            taskId,
+            type: "unassigned",
+            userId: currentUserId,
+            content: null,
+            eventData: {},
+          },
+        ],
+        tx,
+      );
+    }
+
+    await tx
+      .delete(externalLinkTable)
+      .where(
+        and(
+          eq(externalLinkTable.taskId, taskId),
+          isNotNull(externalLinkTable.integrationId),
+          notInArray(
+            externalLinkTable.integrationId,
+            tx
+              .select({ id: integrationTable.id })
+              .from(integrationTable)
+              .where(eq(integrationTable.projectId, destinationProjectId)),
+          ),
+        ),
+      );
 
     await tx
       .update(assetTable)
       .set({ projectId: destinationProjectId })
       .where(eq(assetTable.taskId, taskId));
 
-    return updatedTask;
+    return movedTask;
   });
 
   await publishEvent("task.moved", {

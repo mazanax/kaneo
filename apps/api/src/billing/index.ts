@@ -10,6 +10,7 @@ import {
   errorResponse,
   jsonResponse,
 } from "../openapi";
+import { requireUserSession } from "../utils/require-user-session";
 import { validateWorkspaceAccess } from "../utils/validate-workspace-access";
 import { creemWebhookSecret, isBillingEnabled } from "./config";
 import createCheckout from "./controllers/create-checkout";
@@ -87,11 +88,12 @@ const getWorkspaceBillingRoute = createRoute({
       "Billing state for the workspace",
       workspaceBillingSchema,
     ),
-    403: errorResponse("No access to the workspace"),
+    404: errorResponse("Workspace not found"),
   },
 });
 
 const createCheckoutRoute = createRoute({
+  middleware: [requireUserSession] as const,
   ...cloudOnly,
   method: "post",
   operationId: "createBillingCheckout",
@@ -111,10 +113,12 @@ const createCheckoutRoute = createRoute({
     200: jsonResponse("The checkout session", checkoutSchema),
     400: errorResponse("Invalid plan or interval"),
     403: errorResponse("Not a workspace owner or admin"),
+    404: errorResponse("Workspace not found"),
   },
 });
 
 const createPortalRoute = createRoute({
+  middleware: [requireUserSession] as const,
   ...cloudOnly,
   method: "post",
   operationId: "createBillingPortalSession",
@@ -128,6 +132,7 @@ const createPortalRoute = createRoute({
     200: jsonResponse("The portal link", portalSchema),
     400: errorResponse("No billing customer exists for this workspace yet"),
     403: errorResponse("Not a workspace owner or admin"),
+    404: errorResponse("Workspace not found"),
   },
 });
 

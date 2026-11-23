@@ -8,6 +8,9 @@ const relatedTaskSchema = z
     id: z.string(),
     title: z.string(),
     status: z.string(),
+    isCompleted: z.boolean().openapi({
+      description: "Whether the task is in a final column of its own project.",
+    }),
     priority: z.string().nullable(),
     number: z.number().nullable(),
     projectId: z.string(),
@@ -38,3 +41,5 @@ export const taskRelationWithTasksSchema = taskRelationSchema
 export const taskRelationWithTasksListSchema = z.array(
   taskRelationWithTasksSchema,
 );
+
+export const taskRelationListSchema = z.array(taskRelationSchema);

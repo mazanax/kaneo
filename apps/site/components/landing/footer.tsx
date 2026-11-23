@@ -1,4 +1,6 @@
 import { Logo } from "@/components/landing/logo";
+import { press } from "@/lib/press";
+import { appStoreUrl } from "@/lib/product";
 
 export function Footer() {
   return (
@@ -10,7 +12,7 @@ export function Footer() {
               <Logo />
             </a>
             <p className="max-w-sm text-balance text-muted-foreground text-sm">
-              All you need. Nothing you don&apos;t.
+              Project management that doesn&apos;t become the project.
             </p>
           </div>
 
@@ -25,13 +27,21 @@ export function Footer() {
               </a>
               <a
                 className="block text-muted-foreground transition-colors hover:text-foreground"
+                href={appStoreUrl}
+                target="_blank"
+                rel="noreferrer"
+              >
+                iOS app
+              </a>
+              <a
+                className="block text-muted-foreground transition-colors hover:text-foreground"
                 href="/docs/core"
               >
                 Getting Started
               </a>
               <a
                 className="block text-muted-foreground transition-colors hover:text-foreground"
-                href="#features"
+                href="/#features"
               >
                 Features
               </a>
@@ -77,6 +87,12 @@ export function Footer() {
               <p className="font-medium">Resources</p>
               <a
                 className="block text-muted-foreground transition-colors hover:text-foreground"
+                href="/press"
+              >
+                {press.title}
+              </a>
+              <a
+                className="block text-muted-foreground transition-colors hover:text-foreground"
                 href="https://github.com/usekaneo/kaneo"
                 target="_blank"
                 rel="noreferrer"
@@ -103,6 +119,12 @@ export function Footer() {
 
             <div className="space-y-3 text-sm">
               <p className="font-medium">Community</p>
+              <a
+                className="block text-muted-foreground transition-colors hover:text-foreground"
+                href="/community"
+              >
+                Community projects
+              </a>
               <a
                 className="block text-muted-foreground transition-colors hover:text-foreground"
                 href="https://discord.com/invite/rU4tSyhXXU"

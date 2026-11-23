@@ -1,5 +1,6 @@
 import { client } from "@kaneo/libs";
 
+import { HttpError } from "@/lib/http-error";
 export type DetachLabelFromTaskRequest = {
   labelId: string;
 };
@@ -10,7 +11,7 @@ async function detachLabelFromTask({ labelId }: DetachLabelFromTaskRequest) {
   });
 
   if (!response.ok) {
-    throw new Error(await response.text());
+    throw await HttpError.fromResponse(response);
   }
 
   return response.json();

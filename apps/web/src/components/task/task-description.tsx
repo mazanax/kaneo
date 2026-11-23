@@ -1,30 +1,26 @@
+import { ShortcutKeys } from "@/components/shortcuts/shortcut-keys";
+import {
+  richTextCommands,
+  type SlashCommand,
+  type SlashRange,
+} from "@/components/editor/slash-commands";
+import { BubbleLinkEditor } from "@/components/editor/bubble-link-editor";
+import { selectionStartAnchor } from "@/components/editor/selection-start-anchor";
+import { TableToolbar } from "@/components/editor/table-toolbar";
+import { createEditorExtensions } from "@/components/editor/extensions";
+import { insertUploadedAsset as insertEditorAsset } from "@/components/editor/insert-uploaded-asset";
+import { useEditorHighlighter } from "@/components/editor/use-editor-highlighter";
 import type { Editor } from "@tiptap/core";
-import Image from "@tiptap/extension-image";
-import Placeholder from "@tiptap/extension-placeholder";
-import { Table } from "@tiptap/extension-table";
-import TableCell from "@tiptap/extension-table-cell";
-import TableHeader from "@tiptap/extension-table-header";
-import TableRow from "@tiptap/extension-table-row";
-import TaskList from "@tiptap/extension-task-list";
-import { Markdown } from "@tiptap/markdown";
-import { Fragment, Slice } from "@tiptap/pm/model";
 import { EditorState, TextSelection } from "@tiptap/pm/state";
 import { EditorContent, useEditor } from "@tiptap/react";
 import { BubbleMenu } from "@tiptap/react/menus";
-import StarterKit from "@tiptap/starter-kit";
 import {
-  BetweenHorizontalEnd,
-  BetweenHorizontalStart,
-  BetweenVerticalEnd,
-  BetweenVerticalStart,
   Bold,
   Braces,
   Check,
   ChevronDown,
   Code,
-  Columns3,
   Copy,
-  Grid2x2X,
   Heading2,
   Italic,
   Link2,
@@ -33,22 +29,24 @@ import {
   ListTodo,
   Paperclip,
   Quote,
-  Rows3,
   Strikethrough,
   Table2,
   Underline as UnderlineIcon,
+  ImageUpIcon,
 } from "lucide-react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import {
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { useTranslation } from "react-i18next";
-import { bundledLanguages, type Highlighter } from "shiki";
+import { AuthContext } from "@/components/providers/auth-provider";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogPopup } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -64,7 +62,7 @@ import { useUpdateTaskDescription } from "@/hooks/mutations/task/use-update-task
 import useGetTask from "@/hooks/queries/task/use-get-task";
 import { useWorkspacePermission } from "@/hooks/use-workspace-permission";
 import { cn } from "@/lib/cn";
-import { parseTaskListMarkdownToNodes } from "@/lib/editor-task-list-paste";
+import { descriptionSaveQueue } from "@/lib/description-save-queue";
 import {
   extractIssueKeyFromUrl,
   extractTaskIdFromUrl,
@@ -72,18 +70,11 @@ import {
   normalizeUrl,
 } from "@/lib/editor-url-utils";
 import { isInCodeBlockLanguagePicker } from "@/lib/is-in-codeblock-language-picker";
-import { getSharedShikiHighlighter } from "@/lib/shiki-highlighter";
+import { pasteMarkdown } from "@/lib/paste-markdown";
 import { toast } from "@/lib/toast";
 import { uploadTaskImage } from "@/lib/upload-task-image";
-import { AttachmentCard } from "./extensions/attachment-card";
-import { EmbedBlock } from "./extensions/embed-block";
-import { KaneoIssueLink } from "./extensions/kaneo-issue-link";
-import { MermaidBlock } from "./extensions/mermaid-block";
-import {
-  SHIKI_CODEBLOCK_REFRESH_META,
-  ShikiCodeBlock,
-} from "./extensions/shiki-code-block";
-import { TaskItemWithCheckbox } from "./extensions/task-item-with-checkbox";
+import { ResizableImage } from "./extensions/resizable-image";
+import { SHIKI_CODEBLOCK_REFRESH_META } from "./extensions/shiki-code-block";
 import "tippy.js/dist/tippy.css";
 
 type TaskDescriptionProps = {
@@ -97,17 +88,6 @@ type HoveredCodeBlock = {
   left: number;
 };
 
-type SlashRange = { from: number; to: number };
-
-type SlashCommand = {
-  id: string;
-  label: string;
-  group: "text" | "lists" | "insert";
-  shortcut?: string;
-  search: string;
-  run: (editor: Editor, range: SlashRange) => void;
-};
-
 type SlashMenuState = {
   from: number;
   to: number;
@@ -117,13 +97,8 @@ type SlashMenuState = {
   selectedIndex: number;
 };
 
-const DESCRIPTION_SAVE_DEBOUNCE_MS = 700;
-
 function formatMarkdown(markdown: string) {
-  return markdown
-    .replace(/\r\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .replace(/\n{2,}$/g, "\n");
+  return markdown.replace(/\r\n/g, "\n");
 }
 
 function resetUndoHistory(editor: Editor) {
@@ -206,101 +181,16 @@ const SHIKI_LANGUAGE_ALIASES: Record<string, string> = {
   reasonml: "ocaml",
 };
 
-const SLASH_COMMANDS: SlashCommand[] = [
-  {
-    id: "paragraph",
-    label: "Text",
-    group: "text",
-    search: "text paragraph normal",
-    run: (editor, range) => {
-      editor.chain().focus().deleteRange(range).setParagraph().run();
-    },
-  },
-  {
-    id: "heading-2",
-    label: "Heading",
-    group: "text",
-    shortcut: "Ctrl Alt 2",
-    search: "heading title h2",
-    run: (editor, range) => {
-      editor
-        .chain()
-        .focus()
-        .deleteRange(range)
-        .toggleHeading({ level: 2 })
-        .run();
-    },
-  },
-  {
-    id: "bullet-list",
-    label: "Bulleted list",
-    group: "lists",
-    shortcut: "Ctrl Alt 8",
-    search: "list bullet unordered",
-    run: (editor, range) => {
-      editor.chain().focus().deleteRange(range).toggleBulletList().run();
-    },
-  },
-  {
-    id: "task-list",
-    label: "To-do list",
-    group: "lists",
-    search: "todo to-do checklist checkbox task list",
-    run: (editor, range) => {
-      editor.chain().focus().deleteRange(range).toggleTaskList().run();
-    },
-  },
-  {
-    id: "ordered-list",
-    label: "Numbered list",
-    group: "lists",
-    shortcut: "Ctrl Alt 9",
-    search: "list ordered numbered",
-    run: (editor, range) => {
-      editor.chain().focus().deleteRange(range).toggleOrderedList().run();
-    },
-  },
-  {
-    id: "blockquote",
-    label: "Quote",
-    group: "insert",
-    search: "quote blockquote",
-    run: (editor, range) => {
-      editor.chain().focus().deleteRange(range).toggleBlockquote().run();
-    },
-  },
-  {
-    id: "code-block",
-    label: "Code block",
-    group: "insert",
-    shortcut: "Ctrl Alt \\",
-    search: "code snippet",
-    run: (editor, range) => {
-      editor.chain().focus().deleteRange(range).toggleCodeBlock().run();
-    },
-  },
-  {
-    id: "table",
-    label: "Table",
-    group: "insert",
-    search: "table grid",
-    run: (editor, range) => {
-      editor
-        .chain()
-        .focus()
-        .deleteRange(range)
-        .insertTable({ cols: 3, rows: 3 })
-        .run();
-    },
-  },
-];
-
 export default function TaskDescription({ taskId }: TaskDescriptionProps) {
   const { t } = useTranslation();
   const { data: task } = useGetTask(taskId);
   const { mutateAsync: updateTaskDescription } = useUpdateTaskDescription();
   const { canUpdateTasks } = useWorkspacePermission();
-  const canEdit = canUpdateTasks();
+  const ownerId = useContext(AuthContext).user?.id ?? "";
+  const savesPaused = useSyncExternalStore(descriptionSaveQueue.subscribe, () =>
+    descriptionSaveQueue.isPaused(ownerId),
+  );
+  const canEdit = canUpdateTasks() && !savesPaused;
   const canEditRef = useRef(canEdit);
   canEditRef.current = canEdit;
 
@@ -312,6 +202,13 @@ export default function TaskDescription({ taskId }: TaskDescriptionProps) {
   const updateTaskRef = useRef(updateTaskDescription);
   const activeTaskIdRef = useRef<string | null>(null);
   const lastEditorRef = useRef<Editor | null>(null);
+  const isMountedRef = useRef(false);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
   const pendingImageInsertRef = useRef<{
     editor: Editor;
     range?: SlashRange;
@@ -326,10 +223,11 @@ export default function TaskDescription({ taskId }: TaskDescriptionProps) {
   const [isCodeLanguageMenuOpen, setIsCodeLanguageMenuOpen] = useState(false);
   const codeCopyResetTimeoutRef = useRef<number | null>(null);
   const [isCodeCopied, setIsCodeCopied] = useState(false);
-  const [shikiHighlighter, setShikiHighlighter] = useState<Highlighter | null>(
-    null,
-  );
-  const shikiHighlighterRef = useRef<Highlighter | null>(null);
+  const {
+    highlighter: shikiHighlighter,
+    highlighterRef: shikiHighlighterRef,
+    languages: shikiSupportedLanguages,
+  } = useEditorHighlighter();
   const [slashMenu, setSlashMenu] = useState<SlashMenuState | null>(null);
   const [embedComposer, setEmbedComposer] = useState<EmbedComposerState | null>(
     null,
@@ -348,10 +246,6 @@ export default function TaskDescription({ taskId }: TaskDescriptionProps) {
     updateTaskRef.current = updateTaskDescription;
   }, [task, taskId, updateTaskDescription]);
 
-  const shikiSupportedLanguages = useMemo(
-    () => new Set([...Object.keys(bundledLanguages), "text"]),
-    [],
-  );
   const toShikiLanguage = useCallback(
     (language: string) => SHIKI_LANGUAGE_ALIASES[language] || language,
     [],
@@ -387,44 +281,18 @@ export default function TaskDescription({ taskId }: TaskDescriptionProps) {
 
   const insertUploadedAsset = useCallback(
     (
-      activeEditor: Editor,
+      editor: Editor,
       asset: Awaited<ReturnType<typeof uploadTaskImage>>,
       range?: SlashRange,
     ) => {
-      const chain = activeEditor.chain().focus();
-
-      if (range) {
-        chain.deleteRange(range);
-      } else {
-        const { selection } = activeEditor.state;
-        if (!selection.empty) {
-          chain.setTextSelection(selection.to);
-        }
-      }
-
-      if (asset.kind === "image") {
-        chain
-          .setImage({
-            src: asset.url,
-            alt: asset.alt,
-          })
-          .run();
-        return;
-      }
-
-      chain
-        .insertContent({
-          type: "attachmentCard",
-          attrs: {
-            url: asset.url,
-            filename: asset.filename,
-            mimeType: asset.mimeType,
-            size: asset.size,
-          },
-        })
-        .run();
+      insertEditorAsset(
+        editor,
+        asset,
+        t("tasks:detail.editor.upload.failed"),
+        range,
+      );
     },
-    [],
+    [t],
   );
 
   const handleAssetFileUpload = useCallback(
@@ -449,18 +317,29 @@ export default function TaskDescription({ taskId }: TaskDescriptionProps) {
           file,
         });
 
-        if (activeEditor.isDestroyed || taskIdRef.current !== uploadTaskId) {
+        // The captured editor can be destroyed and replaced while the upload
+        // is in flight; fall back to the current instance for the same task.
+        const currentEditor = !activeEditor.isDestroyed
+          ? activeEditor
+          : lastEditorRef.current;
+        if (!isMountedRef.current || taskIdRef.current !== uploadTaskId) {
           toast.dismiss(loadingToast);
           return;
         }
+        if (!currentEditor || currentEditor.isDestroyed) {
+          throw new Error(t("tasks:detail.editor.upload.failed"));
+        }
 
-        insertUploadedAsset(activeEditor, uploadedAsset, range);
+        // insertUploadedAsset throws on failure and the catch below reports
+        // it, so reaching the toast means the image is in the document.
+        insertUploadedAsset(currentEditor, uploadedAsset, range);
 
         toast.dismiss(loadingToast);
         toast.success(
           uploadedAsset.kind === "image"
             ? t("tasks:detail.editor.upload.imageSuccess")
             : t("tasks:detail.editor.upload.fileSuccess"),
+          { icon: ImageUpIcon },
         );
       } catch (error) {
         toast.dismiss(loadingToast);
@@ -536,7 +415,7 @@ export default function TaskDescription({ taskId }: TaskDescriptionProps) {
 
   const slashCommands = useMemo(
     () => [
-      ...SLASH_COMMANDS.map((command) => ({
+      ...richTextCommands.map((command) => ({
         ...command,
         label: t(`tasks:detail.editor.slash.commands.${command.id}`, {
           defaultValue: command.label,
@@ -556,109 +435,42 @@ export default function TaskDescription({ taskId }: TaskDescriptionProps) {
     [openImagePicker, t],
   );
 
-  useEffect(() => {
-    let isDisposed = false;
+  const ownerIdRef = useRef(ownerId);
+  ownerIdRef.current = ownerId;
 
-    void getSharedShikiHighlighter()
-      .then((nextHighlighter) => {
-        shikiHighlighterRef.current = nextHighlighter;
-        if (!isDisposed) {
-          setShikiHighlighter(nextHighlighter);
-        }
-      })
-      .catch((error) => {
-        console.error("Failed to initialize Shiki highlighter:", error);
-      });
-
-    return () => {
-      isDisposed = true;
-    };
-  }, []);
-
-  const pendingDescriptionSavesRef = useRef(
-    new Map<string, ReturnType<typeof setTimeout>>(),
+  const saveState = useSyncExternalStore(
+    descriptionSaveQueue.subscribe,
+    () => descriptionSaveQueue.get(taskId, ownerId)?.state ?? "saved",
   );
-
   const scheduleDescriptionSave = useCallback((markdown: string) => {
     if (!canEditRef.current) return;
-
     const editedTask = taskRef.current;
     if (!editedTask) return;
-
-    const timers = pendingDescriptionSavesRef.current;
-    const pending = timers.get(editedTask.id);
-    if (pending) clearTimeout(pending);
-
-    timers.set(
+    descriptionSaveQueue.schedule(
       editedTask.id,
-      setTimeout(async () => {
-        timers.delete(editedTask.id);
-
-        const updateTaskFn = updateTaskRef.current;
-        if (!updateTaskFn) return;
-
-        const latestTask = taskRef.current;
-        const base = latestTask?.id === editedTask.id ? latestTask : editedTask;
-
-        try {
-          await updateTaskFn({
-            ...base,
-            description: markdown,
-          });
-        } catch (error) {
-          console.error("Failed to update description:", error);
-        }
-      }, DESCRIPTION_SAVE_DEBOUNCE_MS),
+      markdown,
+      (description) =>
+        updateTaskRef.current({
+          ...(taskRef.current?.id === editedTask.id
+            ? taskRef.current
+            : editedTask),
+          description,
+        }),
+      ownerIdRef.current,
     );
   }, []);
 
+  const linkShortcutRef = useRef(() => {});
+  const attachShortcutRef = useRef(() => {});
   const editor = useEditor(
     {
       immediatelyRender: false,
-      extensions: [
-        StarterKit.configure({
-          codeBlock: {
-            HTMLAttributes: { class: "kaneo-tiptap-codeblock" },
-          },
-          trailingNode: false,
-          heading: { levels: [1, 2, 3] },
-        }),
-        Markdown.configure({
-          markedOptions: {
-            breaks: true,
-            gfm: true,
-          },
-        }),
-        ShikiCodeBlock.configure({
-          highlighter: () => shikiHighlighterRef.current,
-          resolveLanguage: toShikiLanguage,
-          themeDark: "github-dark",
-          themeLight: "github-light",
-        }),
-        MermaidBlock,
-        EmbedBlock,
-        AttachmentCard,
-        KaneoIssueLink,
-        TaskList,
-        Image.configure({
-          HTMLAttributes: {
-            class: "kaneo-editor-image",
-            loading: "lazy",
-          },
-        }),
-        TaskItemWithCheckbox.configure({
-          nested: true,
-        }),
-        Placeholder.configure({
-          placeholder: t("tasks:detail.editor.placeholder"),
-        }),
-        Table.configure({
-          resizable: true,
-        }),
-        TableRow,
-        TableHeader,
-        TableCell,
-      ],
+      extensions: createEditorExtensions({
+        placeholder: t("tasks:detail.editor.placeholder"),
+        highlighter: () => shikiHighlighterRef.current,
+        resolveLanguage: toShikiLanguage,
+        image: ResizableImage,
+      }),
       editorProps: {
         attributes: {
           class: "kaneo-tiptap-prose",
@@ -674,20 +486,7 @@ export default function TaskDescription({ taskId }: TaskDescriptionProps) {
           }
 
           const plainText = event.clipboardData?.getData("text/plain") || "";
-          const taskListNodes = parseTaskListMarkdownToNodes(plainText);
-          if (taskListNodes) {
-            event.preventDefault();
-            const nodes = taskListNodes.map((node) =>
-              view.state.schema.nodeFromJSON(node),
-            );
-            const fragment = Fragment.fromArray(nodes);
-            view.dispatch(
-              view.state.tr
-                .replaceSelection(new Slice(fragment, 0, 0))
-                .scrollIntoView(),
-            );
-            return true;
-          }
+          if (pasteMarkdown(view, event)) return true;
 
           const pastedText = plainText.trim();
           if (!pastedText || /\s/.test(pastedText)) return false;
@@ -737,22 +536,17 @@ export default function TaskDescription({ taskId }: TaskDescriptionProps) {
           setEmbedComposerError("");
           return true;
         },
-        handleDrop: (view, event) => {
+        handleDrop: (_view, event) => {
           const droppedFiles = Array.from(event.dataTransfer?.files || []);
-          const droppedFile = droppedFiles[0];
 
-          if (!droppedFile) return false;
+          if (droppedFiles.length === 0) return false;
 
           event.preventDefault();
-          const coordinates = view.posAtCoords({
-            left: event.clientX,
-            top: event.clientY,
-          });
-          const dropRange = coordinates
-            ? { from: coordinates.pos, to: coordinates.pos }
-            : undefined;
-
-          void handleAssetFileUpload(droppedFile, editor, dropRange);
+          // Each upload inserts after the previous one, the same way pasted
+          // files do, so a multi-file drop keeps every file.
+          for (const droppedFile of droppedFiles) {
+            void handleAssetFileUpload(droppedFile, editor);
+          }
           return true;
         },
         handleTextInput: (view, _from, _to, text) => {
@@ -788,12 +582,20 @@ export default function TaskDescription({ taskId }: TaskDescriptionProps) {
           return true;
         },
         handleKeyDown: (view, event) => {
-          if (
-            !(
-              (event.metaKey || event.ctrlKey) &&
-              event.key.toLowerCase() === "a"
-            )
-          ) {
+          const mod = event.metaKey || event.ctrlKey;
+          const key = event.key.toLowerCase();
+          if (mod && !event.altKey && key === "k") {
+            if (event.shiftKey || view.state.selection.empty) return false;
+            event.preventDefault();
+            linkShortcutRef.current();
+            return true;
+          }
+          if (mod && event.shiftKey && !event.altKey && key === "u") {
+            event.preventDefault();
+            attachShortcutRef.current();
+            return true;
+          }
+          if (!(mod && key === "a")) {
             return false;
           }
 
@@ -813,7 +615,12 @@ export default function TaskDescription({ taskId }: TaskDescriptionProps) {
         },
       },
       onUpdate: ({ editor: activeEditor }) => {
-        if (!canEditRef.current || isSyncingExternalContentRef.current) return;
+        if (
+          !isMountedRef.current ||
+          !canEditRef.current ||
+          isSyncingExternalContentRef.current
+        )
+          return;
         const markdown = formatMarkdown(activeEditor.getMarkdown());
         if (markdown === latestSyncedMarkdownRef.current) return;
         latestSyncedMarkdownRef.current = markdown;
@@ -834,7 +641,7 @@ export default function TaskDescription({ taskId }: TaskDescriptionProps) {
   // user can't update tasks, the description renders as read-only: slash
   // menus, paste handlers, and toolbar buttons all become no-ops because
   // the editor refuses content mutations.
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!editor) return;
     editor.setEditable(canEdit);
   }, [editor, canEdit]);
@@ -865,7 +672,10 @@ export default function TaskDescription({ taskId }: TaskDescriptionProps) {
   }, [editor]);
 
   useEffect(() => {
-    if (!editor) return;
+    // The editor instance can be destroyed and replaced while effects are
+    // flushing (e.g. a language change recreates it via useEditor deps). The
+    // next run attaches to the replacement instance.
+    if (!editor || editor.isDestroyed) return;
 
     const handleImagePreviewClick = (event: MouseEvent) => {
       const target = event.target as HTMLElement | null;
@@ -891,29 +701,23 @@ export default function TaskDescription({ taskId }: TaskDescriptionProps) {
     slashMenuRef.current = slashMenu;
   }, [slashMenu]);
 
-  const setLink = useCallback(
-    (prefilledUrl?: string) => {
-      if (!canEditRef.current || !editor) return;
-      const previousUrl = editor.getAttributes("link").href as
-        | string
-        | undefined;
-      const url = window.prompt(
-        t("tasks:detail.editor.enterUrl"),
-        prefilledUrl || previousUrl || "",
-      );
-      if (url === null) return;
-      if (url.trim() === "") {
-        editor.chain().focus().extendMarkRange("link").unsetLink().run();
-        return;
-      }
-      editor
-        .chain()
-        .focus()
-        .extendMarkRange("link")
-        .setLink({ href: url })
-        .run();
-    },
-    [editor, t],
+  const [isEditingLink, setIsEditingLink] = useState(false);
+
+  const setLink = useCallback(() => {
+    if (!canEditRef.current || !editor) return;
+    setIsEditingLink(true);
+  }, [editor]);
+  linkShortcutRef.current = setLink;
+  attachShortcutRef.current = () => openImagePicker(editor);
+
+  const bubbleAnchor = useCallback(
+    () => (editor ? selectionStartAnchor(editor) : null),
+    [editor],
+  );
+
+  const bubbleOptions = useMemo(
+    () => ({ onHide: () => setIsEditingLink(false) }),
+    [],
   );
 
   const filteredSlashCommands = useMemo(() => {
@@ -1032,7 +836,12 @@ export default function TaskDescription({ taskId }: TaskDescriptionProps) {
       latestSyncedMarkdownRef.current = "";
     }
 
-    const incomingMarkdown = formatMarkdown(task?.description || "");
+    const pendingSave = descriptionSaveQueue.get(taskId, ownerId);
+    const incomingMarkdown = formatMarkdown(
+      pendingSave && pendingSave.state !== "saved"
+        ? pendingSave.value
+        : task?.description || "",
+    );
     if (!hasHydratedRef.current) {
       isSyncingExternalContentRef.current = true;
       latestSyncedMarkdownRef.current = incomingMarkdown;
@@ -1047,7 +856,8 @@ export default function TaskDescription({ taskId }: TaskDescriptionProps) {
       return;
     }
 
-    if (editor.isFocused) return;
+    if (editor.isFocused || (pendingSave && pendingSave.state !== "saved"))
+      return;
     if (incomingMarkdown === latestSyncedMarkdownRef.current) return;
 
     isSyncingExternalContentRef.current = true;
@@ -1056,7 +866,7 @@ export default function TaskDescription({ taskId }: TaskDescriptionProps) {
     requestAnimationFrame(() => {
       isSyncingExternalContentRef.current = false;
     });
-  }, [editor, taskId, task?.description]);
+  }, [editor, taskId, task?.id, task?.description, ownerId]);
 
   useEffect(() => {
     if (!editor) return;
@@ -1174,6 +984,7 @@ export default function TaskDescription({ taskId }: TaskDescriptionProps) {
       const commands = filteredSlashCommandsRef.current;
       if (event.key === "Escape") {
         event.preventDefault();
+        event.stopPropagation();
         setSlashMenu(null);
         return;
       }
@@ -1361,6 +1172,24 @@ export default function TaskDescription({ taskId }: TaskDescriptionProps) {
     };
   }, [hoveredCodeBlock, updateHoveredCodeBlockFromElement]);
 
+  useEffect(() => {
+    if (!editor || !hoveredCodeBlock) return;
+    const syncAfterEdit = () => {
+      const element = hoveredCodeBlockElementRef.current;
+      if (element?.isConnected) {
+        updateHoveredCodeBlockFromElement(element);
+        return;
+      }
+      hoveredCodeBlockElementRef.current = null;
+      setHoveredCodeBlock(null);
+      setIsCodeLanguageMenuOpen(false);
+    };
+    editor.on("update", syncAfterEdit);
+    return () => {
+      editor.off("update", syncAfterEdit);
+    };
+  }, [editor, hoveredCodeBlock, updateHoveredCodeBlockFromElement]);
+
   const handleEditorMouseMove = useCallback(
     (event: ReactMouseEvent<HTMLElement>) => {
       const target = event.target as HTMLElement;
@@ -1396,9 +1225,10 @@ export default function TaskDescription({ taskId }: TaskDescriptionProps) {
   return (
     <section
       ref={editorShellRef}
+      data-task-action="description"
       aria-label={t("tasks:detail.editor.ariaLabel")}
       className={cn(
-        "kaneo-tiptap-shell group",
+        "kaneo-tiptap-shell group relative",
         isDragActive && "is-drag-active",
       )}
       onDragEnter={handleShellDragEnter}
@@ -1406,6 +1236,31 @@ export default function TaskDescription({ taskId }: TaskDescriptionProps) {
       onDragLeave={handleShellDragLeave}
       onDrop={handleShellDrop}
     >
+      {canEdit && (
+        <div
+          role="status"
+          aria-live="polite"
+          className={cn(
+            "absolute right-0 -top-6 flex h-6 items-center gap-2 text-muted-foreground text-xs",
+            saveState === "saved" && "sr-only",
+          )}
+        >
+          {saveState === "failed"
+            ? t("tasks:detail.editor.saveFailed")
+            : saveState === "saved"
+              ? t("tasks:detail.editor.saved")
+              : t("tasks:detail.editor.saving")}
+          {saveState === "failed" && (
+            <Button
+              size="xs"
+              variant="ghost"
+              onClick={() => descriptionSaveQueue.retry(taskId, ownerId)}
+            >
+              {t("tasks:detail.editor.retrySave")}
+            </Button>
+          )}
+        </div>
+      )}
       <input
         ref={imageInputRef}
         type="file"
@@ -1507,6 +1362,8 @@ export default function TaskDescription({ taskId }: TaskDescriptionProps) {
         <BubbleMenu
           editor={editor}
           className="kaneo-tiptap-bubble"
+          getReferencedVirtualElement={bubbleAnchor}
+          options={bubbleOptions}
           shouldShow={({ editor: activeEditor, from, to }) => {
             if (activeEditor.isActive("embedBlock")) return false;
             if (activeEditor.isActive("image")) return false;
@@ -1514,170 +1371,183 @@ export default function TaskDescription({ taskId }: TaskDescriptionProps) {
             return from !== to;
           }}
         >
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            className={cn(
-              "kaneo-tiptap-bubble-btn",
-              editor.isActive("heading", { level: 2 }) &&
-                "bg-accent text-accent-foreground",
-            )}
-            onClick={() =>
-              editor.chain().focus().toggleHeading({ level: 2 }).run()
-            }
-          >
-            <Heading2 className="size-3.5" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            className={cn(
-              "kaneo-tiptap-bubble-btn",
-              editor.isActive("bulletList") &&
-                "bg-accent text-accent-foreground",
-            )}
-            onClick={() => editor.chain().focus().toggleBulletList().run()}
-          >
-            <List className="size-3.5" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            className={cn(
-              "kaneo-tiptap-bubble-btn",
-              editor.isActive("taskList") && "bg-accent text-accent-foreground",
-            )}
-            onClick={() => editor.chain().focus().toggleTaskList().run()}
-          >
-            <ListTodo className="size-3.5" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            className={cn(
-              "kaneo-tiptap-bubble-btn",
-              editor.isActive("orderedList") &&
-                "bg-accent text-accent-foreground",
-            )}
-            onClick={() => editor.chain().focus().toggleOrderedList().run()}
-          >
-            <ListOrdered className="size-3.5" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            className={cn(
-              "kaneo-tiptap-bubble-btn",
-              editor.isActive("blockquote") &&
-                "bg-accent text-accent-foreground",
-            )}
-            onClick={() => editor.chain().focus().toggleBlockquote().run()}
-          >
-            <Quote className="size-3.5" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            className={cn(
-              "kaneo-tiptap-bubble-btn",
-              editor.isActive("codeBlock") &&
-                "bg-accent text-accent-foreground",
-            )}
-            onClick={() => editor.chain().focus().toggleCodeBlock().run()}
-          >
-            <Braces className="size-3.5" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            className="kaneo-tiptap-bubble-btn"
-            onClick={() =>
-              editor.chain().focus().insertTable({ cols: 3, rows: 3 }).run()
-            }
-          >
-            <Table2 className="size-3.5" />
-          </Button>
-          <span className="kaneo-tiptap-bubble-separator" />
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            className={cn(
-              "kaneo-tiptap-bubble-btn",
-              editor.isActive("bold") && "bg-accent text-accent-foreground",
-            )}
-            onClick={() => editor.chain().focus().toggleBold().run()}
-          >
-            <Bold className="size-3.5" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            className={cn(
-              "kaneo-tiptap-bubble-btn",
-              editor.isActive("italic") && "bg-accent text-accent-foreground",
-            )}
-            onClick={() => editor.chain().focus().toggleItalic().run()}
-          >
-            <Italic className="size-3.5" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            className={cn(
-              "kaneo-tiptap-bubble-btn",
-              editor.isActive("underline") &&
-                "bg-accent text-accent-foreground",
-            )}
-            onClick={() => editor.chain().focus().toggleUnderline().run()}
-          >
-            <UnderlineIcon className="size-3.5" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            className={cn(
-              "kaneo-tiptap-bubble-btn",
-              editor.isActive("strike") && "bg-accent text-accent-foreground",
-            )}
-            onClick={() => editor.chain().focus().toggleStrike().run()}
-          >
-            <Strikethrough className="size-3.5" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            className={cn(
-              "kaneo-tiptap-bubble-btn",
-              editor.isActive("code") && "bg-accent text-accent-foreground",
-            )}
-            onClick={() => editor.chain().focus().toggleCode().run()}
-          >
-            <Code className="size-3.5" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            className={cn(
-              "kaneo-tiptap-bubble-btn",
-              editor.isActive("link") && "bg-accent text-accent-foreground",
-            )}
-            onClick={() => setLink()}
-          >
-            <Link2 className="size-3.5" />
-          </Button>
+          {isEditingLink ? (
+            <BubbleLinkEditor
+              editor={editor}
+              buttonClassName="kaneo-tiptap-bubble-btn"
+              onClose={() => setIsEditingLink(false)}
+            />
+          ) : (
+            <>
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                className={cn(
+                  "kaneo-tiptap-bubble-btn",
+                  editor.isActive("heading", { level: 2 }) &&
+                    "bg-accent text-accent-foreground",
+                )}
+                onClick={() =>
+                  editor.chain().focus().toggleHeading({ level: 2 }).run()
+                }
+              >
+                <Heading2 className="size-3.5" />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                className={cn(
+                  "kaneo-tiptap-bubble-btn",
+                  editor.isActive("bulletList") &&
+                    "bg-accent text-accent-foreground",
+                )}
+                onClick={() => editor.chain().focus().toggleBulletList().run()}
+              >
+                <List className="size-3.5" />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                className={cn(
+                  "kaneo-tiptap-bubble-btn",
+                  editor.isActive("taskList") &&
+                    "bg-accent text-accent-foreground",
+                )}
+                onClick={() => editor.chain().focus().toggleTaskList().run()}
+              >
+                <ListTodo className="size-3.5" />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                className={cn(
+                  "kaneo-tiptap-bubble-btn",
+                  editor.isActive("orderedList") &&
+                    "bg-accent text-accent-foreground",
+                )}
+                onClick={() => editor.chain().focus().toggleOrderedList().run()}
+              >
+                <ListOrdered className="size-3.5" />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                className={cn(
+                  "kaneo-tiptap-bubble-btn",
+                  editor.isActive("blockquote") &&
+                    "bg-accent text-accent-foreground",
+                )}
+                onClick={() => editor.chain().focus().toggleBlockquote().run()}
+              >
+                <Quote className="size-3.5" />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                className={cn(
+                  "kaneo-tiptap-bubble-btn",
+                  editor.isActive("codeBlock") &&
+                    "bg-accent text-accent-foreground",
+                )}
+                onClick={() => editor.chain().focus().toggleCodeBlock().run()}
+              >
+                <Braces className="size-3.5" />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                className="kaneo-tiptap-bubble-btn"
+                onClick={() =>
+                  editor.chain().focus().insertTable({ cols: 3, rows: 3 }).run()
+                }
+              >
+                <Table2 className="size-3.5" />
+              </Button>
+              <span className="kaneo-tiptap-bubble-separator" />
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                className={cn(
+                  "kaneo-tiptap-bubble-btn",
+                  editor.isActive("bold") && "bg-accent text-accent-foreground",
+                )}
+                onClick={() => editor.chain().focus().toggleBold().run()}
+              >
+                <Bold className="size-3.5" />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                className={cn(
+                  "kaneo-tiptap-bubble-btn",
+                  editor.isActive("italic") &&
+                    "bg-accent text-accent-foreground",
+                )}
+                onClick={() => editor.chain().focus().toggleItalic().run()}
+              >
+                <Italic className="size-3.5" />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                className={cn(
+                  "kaneo-tiptap-bubble-btn",
+                  editor.isActive("underline") &&
+                    "bg-accent text-accent-foreground",
+                )}
+                onClick={() => editor.chain().focus().toggleUnderline().run()}
+              >
+                <UnderlineIcon className="size-3.5" />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                className={cn(
+                  "kaneo-tiptap-bubble-btn",
+                  editor.isActive("strike") &&
+                    "bg-accent text-accent-foreground",
+                )}
+                onClick={() => editor.chain().focus().toggleStrike().run()}
+              >
+                <Strikethrough className="size-3.5" />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                className={cn(
+                  "kaneo-tiptap-bubble-btn",
+                  editor.isActive("code") && "bg-accent text-accent-foreground",
+                )}
+                onClick={() => editor.chain().focus().toggleCode().run()}
+              >
+                <Code className="size-3.5" />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                className={cn(
+                  "kaneo-tiptap-bubble-btn",
+                  editor.isActive("link") && "bg-accent text-accent-foreground",
+                )}
+                onClick={setLink}
+              >
+                <Link2 className="size-3.5" />
+              </Button>
+            </>
+          )}
         </BubbleMenu>
       )}
 
@@ -1690,92 +1560,33 @@ export default function TaskDescription({ taskId }: TaskDescriptionProps) {
             activeEditor.isActive("table") && from === to
           }
         >
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
+          <TableToolbar
+            editor={editor}
             className="kaneo-tiptap-bubble-btn"
-            title={t("tasks:editor.table.addColumnBefore", {
-              defaultValue: "Insert column left",
-            })}
-            onClick={() => editor.chain().focus().addColumnBefore().run()}
-          >
-            <BetweenVerticalStart className="size-3.5" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            className="kaneo-tiptap-bubble-btn"
-            title={t("tasks:editor.table.addColumnAfter", {
-              defaultValue: "Insert column right",
-            })}
-            onClick={() => editor.chain().focus().addColumnAfter().run()}
-          >
-            <BetweenVerticalEnd className="size-3.5" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            className={cn("kaneo-tiptap-bubble-btn", "text-destructive")}
-            title={t("tasks:editor.table.deleteColumn", {
-              defaultValue: "Delete column",
-            })}
-            onClick={() => editor.chain().focus().deleteColumn().run()}
-          >
-            <Columns3 className="size-3.5" />
-          </Button>
-          <span className="kaneo-tiptap-bubble-separator" />
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            className="kaneo-tiptap-bubble-btn"
-            title={t("tasks:editor.table.addRowBefore", {
-              defaultValue: "Insert row above",
-            })}
-            onClick={() => editor.chain().focus().addRowBefore().run()}
-          >
-            <BetweenHorizontalStart className="size-3.5" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            className="kaneo-tiptap-bubble-btn"
-            title={t("tasks:editor.table.addRowAfter", {
-              defaultValue: "Insert row below",
-            })}
-            onClick={() => editor.chain().focus().addRowAfter().run()}
-          >
-            <BetweenHorizontalEnd className="size-3.5" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            className={cn("kaneo-tiptap-bubble-btn", "text-destructive")}
-            title={t("tasks:editor.table.deleteRow", {
-              defaultValue: "Delete row",
-            })}
-            onClick={() => editor.chain().focus().deleteRow().run()}
-          >
-            <Rows3 className="size-3.5" />
-          </Button>
-          <span className="kaneo-tiptap-bubble-separator" />
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            className={cn("kaneo-tiptap-bubble-btn", "text-destructive")}
-            title={t("tasks:editor.table.deleteTable", {
-              defaultValue: "Delete table",
-            })}
-            onClick={() => editor.chain().focus().deleteTable().run()}
-          >
-            <Grid2x2X className="size-3.5" />
-          </Button>
+            labels={{
+              addColumnBefore: t("tasks:editor.table.addColumnBefore", {
+                defaultValue: "Insert column left",
+              }),
+              addColumnAfter: t("tasks:editor.table.addColumnAfter", {
+                defaultValue: "Insert column right",
+              }),
+              deleteColumn: t("tasks:editor.table.deleteColumn", {
+                defaultValue: "Delete column",
+              }),
+              addRowBefore: t("tasks:editor.table.addRowBefore", {
+                defaultValue: "Insert row above",
+              }),
+              addRowAfter: t("tasks:editor.table.addRowAfter", {
+                defaultValue: "Insert row below",
+              }),
+              deleteRow: t("tasks:editor.table.deleteRow", {
+                defaultValue: "Delete row",
+              }),
+              deleteTable: t("tasks:editor.table.deleteTable", {
+                defaultValue: "Delete table",
+              }),
+            }}
+          />
         </BubbleMenu>
       )}
 
@@ -1823,9 +1634,12 @@ export default function TaskDescription({ taskId }: TaskDescriptionProps) {
                         <span className="kaneo-tiptap-slash-label">
                           {command.label}
                         </span>
-                        {command.shortcut && (
+                        {command.shortcutId && (
                           <span className="kaneo-tiptap-slash-shortcut">
-                            {command.shortcut}
+                            <ShortcutKeys
+                              id={command.shortcutId}
+                              tone="muted"
+                            />
                           </span>
                         )}
                       </button>
@@ -1962,12 +1776,12 @@ export default function TaskDescription({ taskId }: TaskDescriptionProps) {
         }}
       >
         <DialogPopup
-          className="max-w-6xl border-0 bg-transparent p-0 shadow-none before:hidden"
+          className="w-auto max-w-6xl border-0 bg-transparent p-0 shadow-none before:hidden"
           showCloseButton={false}
           bottomStickOnMobile={false}
         >
           {previewImage && (
-            <div className="flex max-h-[90vh] items-center justify-center p-4">
+            <div className="flex max-h-[90vh] items-center justify-center">
               <img
                 src={previewImage.src}
                 alt={previewImage.alt}
